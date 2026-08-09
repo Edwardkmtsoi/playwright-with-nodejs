@@ -11,17 +11,44 @@ export class BrowserService {
 
     logger.info('Initializing Playwright browser');
 
-    this.browser = await chromium.launch({
+    const proxyServer = process.env.PROXY_SERVER;
+    const proxyUsername = process.env.PROXY_USERNAME;
+    const proxyPassword = process.env.PROXY_PASSWORD;
+
+    const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless: env.PLAYWRIGHT_HEADLESS,
+
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
       ],
-    });
+    };
+
+    // Configure proxy only when PROXY_SERVER is provided.
+    if (proxyServer) {
+      launchOptions.proxy = {
+        server: proxyServer,
+        ...(proxyUsername
+          ? {
+              username: proxyUsername,
+            }
+          : {}),
+        ...(proxyPassword
+          ? {
+              password: proxyPassword,
+            }
+          : {}),
+      };
+
+      logger.info(`Using configured proxy server: ${proxyServer}`);
+    } else {
+      logger.info('No proxy configured - using direct connection');
+    }
+
+    this.browser = await chromium.launch(launchOptions);
 
     this.context = await this.browser.newContext({
-      // Use a current Chrome-style user agent instead of the old Chrome 91 UA.
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 
