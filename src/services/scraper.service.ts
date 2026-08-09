@@ -4,6 +4,19 @@ import { browserService } from './browser.service';
 import env from '../config/env';
 import { Product, ScrapeSite } from '../types/scrape.types';
 
+export interface CustomScrapeOptions {
+  url: string;
+  selectors?: Record<string, string>;
+  timeout?: number;
+}
+
+export interface CustomScrapeResult {
+  url: string;
+  title: string;
+  text: string;
+  fields: Record<string, string | null>;
+}
+
 export class ScraperService {
   async scrapeTestSites(): Promise<ScrapeSite[]> {
     let page: Page | null = null;
@@ -24,7 +37,12 @@ export class ScraperService {
           const href = link.getAttribute('href');
           const text = link.textContent?.trim();
 
-          if (href && text && !text.includes('test-sites') && !items.some((s) => s.url === href)) {
+          if (
+            href &&
+            text &&
+            !text.includes('test-sites') &&
+            !items.some((s) => s.url === href)
+          ) {
             items.push({
               title: text,
               url: href,
@@ -55,8 +73,13 @@ export class ScraperService {
       await browserService.initialize();
       page = await browserService.createPage();
 
-      logger.info(`Scraping e-commerce products from ${env.SCRAPER_ECOMMERCE_URL}`);
-      await page.goto(env.SCRAPER_ECOMMERCE_URL, { waitUntil: 'networkidle' });
+      logger.info(
+        `Scraping e-commerce products from ${env.SCRAPER_ECOMMERCE_URL}`,
+      );
+
+      await page.goto(env.SCRAPER_ECOMMERCE_URL, {
+        waitUntil: 'networkidle',
+      });
 
       await page.waitForTimeout(1000);
 
@@ -73,22 +96,28 @@ export class ScraperService {
         ];
 
         let products = document.querySelectorAll(productSelectors[0]);
+
         if (products.length === 0) {
           for (const selector of productSelectors) {
             products = document.querySelectorAll(selector);
-            if (products.length > 0) break;
+
+            if (products.length > 0) {
+              break;
+            }
           }
         }
 
         products.forEach((product) => {
           if (items.length >= max) return;
 
-          const titleEl = product.querySelector('[class*="title"]') ||
+          const titleEl =
+            product.querySelector('[class*="title"]') ||
             product.querySelector('h2') ||
             product.querySelector('h3') ||
             product.querySelector('h1');
 
-          const priceEl = product.querySelector('[class*="price"]') ||
+          const priceEl =
+            product.querySelector('[class*="price"]') ||
             product.querySelector('[class*="cost"]');
 
           const descEl = product.querySelector('[class*="desc"]');
@@ -121,7 +150,92 @@ export class ScraperService {
     }
   }
 
-  async runScrape(target: 'test-sites' | 'ecommerce', limit?: number) {
+  /**
+   * Scrape an arbitrary URL using Playwright.
+   *
+   * The page title and visible text are always returned.
+   *
+   * Optional CSS selectors can be supplied to extract specific fields.
+   *
+   * Example:
+   *
+   * selectors: {
+   *   title: 'h1',
+   *   price: '.price',
+   *   availability: '.availability'
+   * }
+   */
+  async scrapeCustom(
+    options: CustomScrapeOptions,
+  ): Promise<CustomScrapeResult> {
+    let page: Page | null = null;
+
+    const timeout = options.timeout || 60000;
+
+    try {
+      await browserService.initialize();
+      page = await browserService.createPage();
+
+      page.setDefaultTimeout(timeout);
+      page.setDefaultNavigationTimeout(timeout);
+
+      logger.info(`Custom scraping URL: ${options.url}`);
+
+      await page.goto(options.url, {
+        waitUntil: 'domcontentloaded',
+        timeout,
+      });
+
+      // Give JavaScript-heavy pages a short opportunity to finish rendering.
+      await page.waitForTimeout(1500);
+
+      const result = await page.evaluate(
+        ({ selectors }) => {
+          const fields: Record<string, string | null> = {};
+
+          if (selectors) {
+            for (const [name, selector] of Object.entries(selectors)) {
+              try {
+                const element = document.querySelector(selector);
+
+                fields[name] = element?.textContent?.trim() || null;
+              } catch {
+                fields[name] = null;
+              }
+            }
+          }
+
+          return {
+            url: window.location.href,
+            title: document.title,
+            text: document.body?.innerText?.trim() || '',
+            fields,
+          };
+        },
+        {
+          selectors: options.selectors || {},
+        },
+      );
+
+      logger.info(
+        `Custom scrape completed: ${options.url} (${result.text.length} characters)`,
+      );
+
+      return result;
+    } catch (error) {
+      logger.error(`Error scraping custom URL ${options.url}:`, error);
+      throw error;
+    } finally {
+      if (page) {
+        await browserService.closePage(page);
+      }
+    }
+  }
+
+  async runScrape(
+    target: 'test-sites' | 'ecommerce',
+    limit?: number,
+  ) {
     const startTime = Date.now();
 
     try {
@@ -141,11 +255,15 @@ export class ScraperService {
         meta: {
           count: Array.isArray(data) ? data.length : 0,
           durationMs: Date.now() - startTime,
-          targetUrl: target === 'test-sites' ? env.SCRAPER_BASE_URL : env.SCRAPER_ECOMMERCE_URL,
+          targetUrl:
+            target === 'test-sites'
+              ? env.SCRAPER_BASE_URL
+              : env.SCRAPER_ECOMMERCE_URL,
         },
       };
     } catch (error) {
       logger.error(`Error running scrape for target ${target}:`, error);
+
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
