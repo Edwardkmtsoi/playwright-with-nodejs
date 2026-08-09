@@ -10,15 +10,45 @@ export class BrowserService {
     if (this.browser) return;
 
     logger.info('Initializing Playwright browser');
+
     this.browser = await chromium.launch({
       headless: env.PLAYWRIGHT_HEADLESS,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
     });
 
     this.context = await this.browser.newContext({
+      // Use a current Chrome-style user agent instead of the old Chrome 91 UA.
       userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-      viewport: { width: 1280, height: 720 },
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+
+      viewport: {
+        width: 1366,
+        height: 768,
+      },
+
+      locale: 'en-NZ',
+
+      timezoneId: 'Pacific/Auckland',
+
+      colorScheme: 'light',
+
+      deviceScaleFactor: 1,
+
+      javaScriptEnabled: true,
+
+      acceptDownloads: false,
+
+      extraHTTPHeaders: {
+        'Accept-Language':
+          'en-NZ,en;q=0.9,en-US;q=0.8',
+      },
     });
+
+    logger.info('Playwright browser context initialized');
   }
 
   async createPage(): Promise<Page> {
@@ -31,6 +61,7 @@ export class BrowserService {
     }
 
     const page = await this.context.newPage();
+
     page.setDefaultTimeout(env.PLAYWRIGHT_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(env.PLAYWRIGHT_TIMEOUT_MS);
 
@@ -52,6 +83,7 @@ export class BrowserService {
       } catch (error) {
         logger.warn('Error closing context:', error);
       }
+
       this.context = null;
     }
 
@@ -61,6 +93,7 @@ export class BrowserService {
       } catch (error) {
         logger.warn('Error closing browser:', error);
       }
+
       this.browser = null;
     }
 
