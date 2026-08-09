@@ -1,5 +1,13 @@
-import { Router } from 'express';
-import { getScrapeTestSites, getScrapeEcommerceProducts, postScrapeRun } from '../controllers/scrape.controller';
+import {
+  Router,
+} from 'express';
+
+import {
+  getScrapeTestSites,
+  getScrapeEcommerceProducts,
+  postScrapeRun,
+  postScrapeCustom,
+} from '../controllers/scrape.controller';
 
 const router = Router();
 
@@ -13,25 +21,6 @@ const router = Router();
  *     responses:
  *       200:
  *         description: Successfully scraped test sites
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/ScrapeSite'
- *                 meta:
- *                   $ref: '#/components/schemas/Meta'
- *       500:
- *         description: Scraping error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiError'
  */
 router.get('/sites', getScrapeTestSites);
 
@@ -61,23 +50,6 @@ router.get('/sites', getScrapeTestSites);
  *     responses:
  *       200:
  *         description: Successfully scraped products
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Product'
- *                 meta:
- *                   $ref: '#/components/schemas/Meta'
- *       400:
- *         description: Invalid parameters
- *       500:
- *         description: Scraping error
  */
 router.get('/ecommerce/products', getScrapeEcommerceProducts);
 
@@ -111,22 +83,52 @@ router.get('/ecommerce/products', getScrapeEcommerceProducts);
  *     responses:
  *       200:
  *         description: Scraping task completed
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                 meta:
- *                   $ref: '#/components/schemas/Meta'
+ */
+router.post('/run', postScrapeRun);
+
+/**
+ * @swagger
+ * /api/scrape/custom:
+ *   post:
+ *     summary: Scrape a custom URL using Playwright
+ *     description: |
+ *       Opens a public URL with Playwright and extracts the page title,
+ *       visible text, and optional CSS selector fields.
+ *     tags:
+ *       - Scraper
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - url
+ *             properties:
+ *               url:
+ *                 type: string
+ *                 format: uri
+ *                 example: https://example.com
+ *               selectors:
+ *                 type: object
+ *                 additionalProperties:
+ *                   type: string
+ *                 example:
+ *                   title: h1
+ *                   price: .price
+ *               timeout:
+ *                 type: integer
+ *                 minimum: 1000
+ *                 maximum: 120000
+ *                 default: 60000
+ *     responses:
+ *       200:
+ *         description: Successfully scraped the URL
  *       400:
  *         description: Invalid request
  *       500:
  *         description: Scraping error
  */
-router.post('/run', postScrapeRun);
+router.post('/custom', postScrapeCustom);
 
 export default router;
