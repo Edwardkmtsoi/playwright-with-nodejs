@@ -34,8 +34,11 @@ export class RepcoAdapter {
       await page.waitForTimeout(2000);
 
       const product = await page.evaluate(() => {
-        const cleanText = (value: string | null | undefined) =>
-          value?.replace(/\s+/g, ' ').trim() || null;
+        const cleanText = (
+          value: string | null | undefined
+        ): string | null => {
+          return value?.replace(/\s+/g, ' ').trim() || null;
+        };
 
         const parsePrice = (
           value: string | null | undefined
@@ -49,17 +52,17 @@ export class RepcoAdapter {
           return match ? Number(match[1]) : null;
         };
 
-        // ---------------------------------------------------------
-        // Product name
-        // ---------------------------------------------------------
+        // =========================================================
+        // PRODUCT NAME
+        // =========================================================
 
         const name = cleanText(
           document.querySelector('h1')?.textContent
         );
 
-        // ---------------------------------------------------------
+        // =========================================================
         // SKU
-        // ---------------------------------------------------------
+        // =========================================================
 
         let sku: string | null = null;
 
@@ -73,90 +76,60 @@ export class RepcoAdapter {
           sku = skuMatch[1];
         }
 
-        // ---------------------------------------------------------
+        // =========================================================
         // MAIN PRODUCT PRICE
-        // ---------------------------------------------------------
+        // =========================================================
         //
-        // Do NOT search the entire page for the first $XX value.
+        // Repco uses:
         //
-        // Instead, look for the price associated with the main
-        // product section.
-        // ---------------------------------------------------------
+        // .price__container
+        //     .price
+        //         .price__dollars
+        //
+        // IMPORTANT:
+        // Do NOT search the entire page for .price__dollars.
+        // Related products also contain prices.
+        //
+        // First locate the main product area using the H1.
+        // =========================================================
 
         let price: number | null = null;
 
-        // First try common price selectors used by e-commerce sites.
-        const mainPriceSelectors = [
-          '[class*="product-price"]',
-          '[class*="productPrice"]',
-          '[class*="ProductPrice"]',
-          '[class*="price-current"]',
-          '[class*="current-price"]',
-          '[class*="currentPrice"]',
-          '[class*="sale-price"]',
-          '[class*="salePrice"]',
-          '[class*="price"]',
-        ];
+        const heading = document.querySelector('h1');
 
-        for (const selector of mainPriceSelectors) {
-          const elements = Array.from(
-            document.querySelectorAll(selector)
-          );
+        if (heading) {
+          // Walk up the DOM looking for a container that contains
+          // the product's main price.
+          let current: Element | null = heading;
 
-          for (const element of elements) {
-            const text = cleanText(element.textContent);
+          for (let level = 0; level < 8 && current; level++) {
+            const mainPriceElement =
+              current.querySelector('.price__dollars');
 
-            if (!text) continue;
+            if (mainPriceElement) {
+              const priceText = cleanText(
+                mainPriceElement.textContent
+              );
 
-            const parsed = parsePrice(text);
+              const parsedPrice = parsePrice(priceText);
 
-            if (parsed !== null) {
-              price = parsed;
-              break;
-            }
-          }
-
-          if (price !== null) break;
-        }
-
-        // ---------------------------------------------------------
-        // Fallback:
-        //
-        // Find the product name and inspect its nearby DOM.
-        // This helps avoid prices from "Frequently Viewed Together"
-        // and other recommended products.
-        // ---------------------------------------------------------
-
-        if (price === null) {
-          const heading = document.querySelector('h1');
-
-          if (heading) {
-            let current: Element | null = heading;
-
-            for (let i = 0; i < 5 && current; i++) {
-              const text = cleanText(current.textContent);
-
-              if (text) {
-                const priceMatch = text.match(
-                  /\$\s*(\d+(?:\.\d{1,2})?)/
-                );
-
-                if (priceMatch) {
-                  price = Number(priceMatch[1]);
-                  break;
-                }
+              if (parsedPrice !== null) {
+                price = parsedPrice;
+                break;
               }
-
-              current = current.parentElement;
             }
+
+            current = current.parentElement;
           }
         }
 
-        // ---------------------------------------------------------
-        // Second fallback:
+        // =========================================================
+        // FALLBACK PRICE METHOD
+        // =========================================================
         //
-        // Search the body text around the SKU/product name.
-        // ---------------------------------------------------------
+        // If the DOM structure changes, use the SKU as an anchor.
+        // Search only the text immediately following the SKU.
+        // =========================================================
 
         if (price === null && sku) {
           const skuIndex = bodyText.indexOf(sku);
@@ -164,7 +137,7 @@ export class RepcoAdapter {
           if (skuIndex >= 0) {
             const nearbyText = bodyText.substring(
               skuIndex,
-              skuIndex + 500
+              skuIndex + 300
             );
 
             const priceMatch = nearbyText.match(
@@ -177,9 +150,9 @@ export class RepcoAdapter {
           }
         }
 
-        // ---------------------------------------------------------
-        // Member price
-        // ---------------------------------------------------------
+        // =========================================================
+        // MEMBER PRICE
+        // =========================================================
 
         let memberPrice: number | null = null;
 
@@ -191,9 +164,27 @@ export class RepcoAdapter {
           memberPrice = Number(memberMatch[1]);
         }
 
-        // ---------------------------------------------------------
-        // Availability
-        // ---------------------------------------------------------
+        // =========================================================
+        // ORIGINAL PRICE
+        // =========================================================
+        //
+        // Repco may show:
+        //
+        // $87.75
+        // $117
+        //
+        // where $87.75 is the sale price and $117 is the
+        // original price.
+        //
+        // We will add better handling once we inspect the
+        // sale-price HTML.
+        // =========================================================
+
+        const originalPrice: number | null = null;
+
+        // =========================================================
+        // AVAILABILITY
+        // =========================================================
 
         let availability: string | null = null;
 
@@ -205,11 +196,23 @@ export class RepcoAdapter {
           availability = 'out_of_stock';
         }
 
+        // =========================================================
+        // DEBUG INFORMATION
+        // =========================================================
+
+        console.log('Repco scraper result:', {
+          name,
+          sku,
+          price,
+          memberPrice,
+          availability,
+        });
+
         return {
           name,
           sku,
           price,
-          originalPrice: null,
+          originalPrice,
           memberPrice,
           currency: 'NZD' as const,
           availability,
@@ -223,7 +226,11 @@ export class RepcoAdapter {
         scrapedAt: new Date().toISOString(),
       };
     } catch (error) {
-      logger.error(`Repco scraping failed for ${url}:`, error);
+      logger.error(
+        `Repco scraping failed for ${url}:`,
+        error
+      );
+
       throw error;
     } finally {
       if (page) {
