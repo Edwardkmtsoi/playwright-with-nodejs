@@ -59,7 +59,6 @@ export const createApp = () => {
   app.use('/health', healthRoutes);
   app.use('/api/scrape', scrapeRoutes);
   app.use('/api/tests/smoke', testRoutes);
-  // newly added - per retailer
   app.use('/api/scrape/repco', repcoRoutes);
 
   // 404 handler
