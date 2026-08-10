@@ -1,5 +1,5 @@
 import { Page } from 'playwright';
-import logger from '../../config/logger';
+import logger from '../config/logger';
 import { browserService } from '../browser.service';
 
 export interface RepcoProduct {
@@ -210,6 +210,12 @@ export class RepcoAdapter {
          * Find the smallest useful ancestor containing the product
          * title. This is important because Repco pages contain many
          * prices belonging to recommendations / related products.
+         *
+         * Confirmed against the live Repco PDP markup: the product
+         * title (`.pdp-product-title`) and the price container
+         * (`.price__container`) both live inside `.product-details`,
+         * so walking up from the title a couple of levels reliably
+         * lands on that wrapper.
          */
         const findProductRoot = (): Element | null => {
           const title =
@@ -281,6 +287,8 @@ export class RepcoAdapter {
          * ---------------------------------------------------------
          * SKU
          * ---------------------------------------------------------
+         *
+         * Live markup example: <h5 class="product-sku">SKU: A6220709</h5>
          */
 
         let sku: string | null = null;
@@ -350,7 +358,21 @@ export class RepcoAdapter {
          * STRUCTURED DATA
          * ---------------------------------------------------------
          *
-         * Repco may expose product information through JSON-LD.
+         * Repco exposes a dedicated Product JSON-LD block (separate
+         * from the BreadcrumbList and VideoObject blocks also present
+         * on the page), e.g.:
+         *
+         * {
+         *   "@type": "Product",
+         *   "sku": "A6220709",
+         *   "gtin13": "4054278885766",
+         *   "offers": {
+         *     "@type": "Offer",
+         *     "availability": "https://schema.org/inStock",
+         *     "price": "295",
+         *     "priceCurrency": "NZD"
+         *   }
+         * }
          *
          * This is one of the safest fallback sources because it is
          * explicitly associated with the product rather than a
@@ -358,7 +380,6 @@ export class RepcoAdapter {
          */
 
         let structuredPrice: number | null = null;
-        let structuredOriginalPrice: number | null = null;
         let structuredSku: string | null = null;
         let structuredAvailability:
           | 'in_stock'
@@ -476,6 +497,15 @@ export class RepcoAdapter {
 
         /*
          * 1. Explicit Repco price container.
+         *
+         * Live markup:
+         * <div class="price__container">
+         *   <div class="price">
+         *     <span class="price__dollars has-promo">$295</span>
+         *     <span class="savings">$362</span>
+         *     <span class="price__each">each</span>
+         *   </div>
+         * </div>
          */
         if (productRoot) {
           const priceContainers = Array.from(
@@ -572,6 +602,11 @@ export class RepcoAdapter {
 
             /*
              * Original / previous price.
+             *
+             * NOTE: on Repco's live markup, the "was" price is
+             * rendered as `.savings` (e.g. "$362") sitting alongside
+             * the discounted `.price__dollars` value. It is NOT a
+             * savings *amount* despite the class name.
              */
             const originalSelectors = [
               '.savings',
@@ -660,9 +695,13 @@ export class RepcoAdapter {
 
         /*
          * 3. Meta price.
+         *
+         * Repco also emits og:price:amount, which is a reliable
+         * fallback when the DOM structure changes.
          */
         if (price === null) {
           const metaPriceSelectors = [
+            'meta[property="og:price:amount"]',
             'meta[property="product:price:amount"]',
             'meta[itemprop="price"]',
             'meta[name="price"]',
@@ -792,9 +831,10 @@ export class RepcoAdapter {
          *
          * Do NOT search the whole page.
          *
-         * Repco pages can contain member prices in recommendation
-         * products, which would otherwise be incorrectly assigned to
-         * the main product.
+         * Repco pages can contain member prices (and "Repco Rewards
+         * Member" branding/nav elements) far outside the product
+         * area, which would otherwise be incorrectly assigned to the
+         * main product. All matching is scoped to productRoot.
          */
 
         let memberPrice: number | null = null;
@@ -897,6 +937,15 @@ export class RepcoAdapter {
          * ---------------------------------------------------------
          * AVAILABILITY
          * ---------------------------------------------------------
+         *
+         * Live markup:
+         * <div class="row product-eligibility">
+         *   <div class="row tab-store-change">
+         *     <div class="col-xs-6 store-name">North Shore</div>
+         *     <div class="col-xs-3 text-green stock-status">
+         *       <p class="text-green">In Stock</p>
+         *     </div>
+         *     ...
          */
 
         let availability:
@@ -905,9 +954,6 @@ export class RepcoAdapter {
           | 'check_availability'
           | null = null;
 
-        /*
-         * Prefer Repco's product eligibility area.
-         */
         const eligibilitySelectors = [
           '.product-eligibility',
           '[data-testid*="eligibility" i]',
@@ -1198,4 +1244,3 @@ export class RepcoAdapter {
 }
 
 export const repcoAdapter = new RepcoAdapter();
-
