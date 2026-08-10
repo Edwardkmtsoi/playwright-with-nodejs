@@ -11,7 +11,11 @@ export interface RepcoProduct {
   originalPrice: number | null;
   memberPrice: number | null;
   currency: 'NZD';
-  availability: 'in_stock' | 'out_of_stock' | 'check_availability' | null;
+  availability:
+    | 'in_stock'
+    | 'out_of_stock'
+    | 'check_availability'
+    | null;
   store: string;
   postalCode: string;
   scrapedAt: string;
@@ -37,20 +41,78 @@ export class RepcoAdapter {
         timeout: 60000,
       });
 
-      // Allow Repco's client-side content to finish rendering.
-      await page.waitForTimeout(2000);
+      /*
+       * Repco is heavily client-rendered.
+       *
+       * Wait for the important product elements first, but do not fail
+       * the scrape if a particular selector is not present.
+       */
+      try {
+        await page.waitForLoadState('networkidle', {
+          timeout: 15000,
+        });
+      } catch {
+        logger.debug(
+          `Repco networkidle timeout for ${url}; continuing with rendered page`
+        );
+      }
+
+      await page.waitForTimeout(2500);
+
+      /*
+       * Give the browser a chance to finish rendering price / availability.
+       */
+      try {
+        await page.waitForSelector('h1', {
+          timeout: 10000,
+          state: 'attached',
+        });
+      } catch {
+        logger.debug(`Repco h1 not found quickly for ${url}`);
+      }
 
       /*
        * ---------------------------------------------------------
-       * PRODUCT DATA
+       * EXTRACT PRODUCT
        * ---------------------------------------------------------
        */
-
       const product = await page.evaluate(() => {
+        type ExtractedProduct = {
+          name: string | null;
+          sku: string | null;
+          price: number | null;
+          originalPrice: number | null;
+          memberPrice: number | null;
+          availability:
+            | 'in_stock'
+            | 'out_of_stock'
+            | 'check_availability'
+            | null;
+          store: string | null;
+          diagnostics: {
+            priceSources: string[];
+            memberPriceSources: string[];
+            originalPriceSources: string[];
+          };
+        };
+
+        /*
+         * ---------------------------------------------------------
+         * HELPERS
+         * ---------------------------------------------------------
+         */
+
         const cleanText = (
           value: string | null | undefined
         ): string | null => {
-          return value?.replace(/\s+/g, ' ').trim() || null;
+          if (!value) return null;
+
+          const cleaned = value
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+          return cleaned || null;
         };
 
         const parsePrice = (
@@ -58,12 +120,150 @@ export class RepcoAdapter {
         ): number | null => {
           if (!value) return null;
 
-          const match = value
+          /*
+           * Handles:
+           *
+           * $295
+           * $295.00
+           * $1,295
+           * NZ$295
+           * NZD $295
+           * 295.00
+           */
+          const text = value
+            .replace(/\u00a0/g, ' ')
             .replace(/,/g, '')
-            .match(/\$?\s*(\d+(?:\.\d{1,2})?)/);
+            .trim();
 
-          return match ? Number(match[1]) : null;
+          const match = text.match(
+            /(?:NZD|NZ|\$)\s*(\d+(?:\.\d{1,2})?)/i
+          );
+
+          if (match) {
+            const parsed = Number(match[1]);
+            return Number.isFinite(parsed) ? parsed : null;
+          }
+
+          /*
+           * Fallback for plain numeric values.
+           */
+          const numericMatch = text.match(
+            /\b(\d+(?:\.\d{1,2})?)\b/
+          );
+
+          if (numericMatch) {
+            const parsed = Number(numericMatch[1]);
+            return Number.isFinite(parsed) ? parsed : null;
+          }
+
+          return null;
         };
+
+        const parseAllPrices = (
+          value: string | null | undefined
+        ): number[] => {
+          if (!value) return [];
+
+          const text = value
+            .replace(/\u00a0/g, ' ')
+            .replace(/,/g, '');
+
+          const matches = text.match(
+            /(?:NZD|NZ|\$)\s*\d+(?:\.\d{1,2})?/gi
+          );
+
+          if (!matches) return [];
+
+          return matches
+            .map((match) => parsePrice(match))
+            .filter(
+              (price): price is number =>
+                price !== null && Number.isFinite(price)
+            );
+        };
+
+        const getText = (selector: string): string | null => {
+          const element = document.querySelector(selector);
+
+          return cleanText(element?.textContent);
+        };
+
+        const getAttribute = (
+          selector: string,
+          attribute: string
+        ): string | null => {
+          const element = document.querySelector(selector);
+
+          return cleanText(element?.getAttribute(attribute));
+        };
+
+        const addDiagnostic = (
+          array: string[],
+          source: string
+        ): void => {
+          if (!array.includes(source)) {
+            array.push(source);
+          }
+        };
+
+        /*
+         * Find the smallest useful ancestor containing the product
+         * title. This is important because Repco pages contain many
+         * prices belonging to recommendations / related products.
+         */
+        const findProductRoot = (): Element | null => {
+          const title =
+            document.querySelector('.pdp-product-title') ||
+            document.querySelector('[data-testid*="product-title" i]') ||
+            document.querySelector('h1');
+
+          if (!title) {
+            return (
+              document.querySelector('.product-details') ||
+              document.querySelector('main')
+            );
+          }
+
+          /*
+           * Walk upwards and select an ancestor that contains the
+           * main product information without becoming the entire page.
+           */
+          let current: Element | null = title;
+
+          for (let i = 0; i < 8 && current; i++) {
+            const textLength =
+              current.textContent?.length || 0;
+
+            if (
+              current.querySelector(
+                '.price__container, .price, [class*="price" i]'
+              ) &&
+              textLength < 50000
+            ) {
+              return current;
+            }
+
+            current = current.parentElement;
+          }
+
+          return (
+            document.querySelector('.product-details') ||
+            document.querySelector('main') ||
+            title.parentElement
+          );
+        };
+
+        const productRoot = findProductRoot();
+
+        /*
+         * ---------------------------------------------------------
+         * DIAGNOSTICS
+         * ---------------------------------------------------------
+         */
+
+        const priceSources: string[] = [];
+        const memberPriceSources: string[] = [];
+        const originalPriceSources: string[] = [];
 
         /*
          * ---------------------------------------------------------
@@ -72,10 +272,10 @@ export class RepcoAdapter {
          */
 
         const name =
-          cleanText(
-            document.querySelector('.pdp-product-title')?.textContent
-          ) ||
-          cleanText(document.querySelector('h1')?.textContent);
+          getText('.pdp-product-title') ||
+          getText('[data-testid="product-title"]') ||
+          getText('[data-testid*="product-title" i]') ||
+          getText('h1');
 
         /*
          * ---------------------------------------------------------
@@ -85,120 +285,610 @@ export class RepcoAdapter {
 
         let sku: string | null = null;
 
-        const skuElement = document.querySelector('.product-sku');
+        const skuSelectors = [
+          '.product-sku',
+          '[data-testid="product-sku"]',
+          '[data-testid*="sku" i]',
+          '[class*="sku" i]',
+        ];
 
-        if (skuElement) {
-          const skuMatch = skuElement.textContent?.match(
-            /SKU:\s*([A-Z0-9-]+)/i
+        for (const selector of skuSelectors) {
+          const element = document.querySelector(selector);
+
+          if (!element) continue;
+
+          const text = cleanText(element.textContent);
+
+          if (!text) continue;
+
+          /*
+           * Examples:
+           * SKU: ABC123
+           * SKU ABC123
+           * Product Code: ABC123
+           * Part Number: ABC123
+           */
+          const match = text.match(
+            /(?:SKU|Product\s*(?:Code|Number)|Part\s*Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._-]*)/i
           );
 
-          if (skuMatch) {
-            sku = skuMatch[1];
+          if (match) {
+            sku = match[1].trim();
+            break;
+          }
+
+          /*
+           * If the element itself is clearly a SKU element and
+           * contains only a code, use the value directly.
+           */
+          if (
+            /sku/i.test(selector) &&
+            /^[A-Z0-9][A-Z0-9._-]{2,}$/i.test(text)
+          ) {
+            sku = text;
+            break;
+          }
+        }
+
+        /*
+         * Search product-root text as a final SKU fallback.
+         */
+        if (!sku && productRoot) {
+          const rootText = cleanText(productRoot.textContent) || '';
+
+          const match = rootText.match(
+            /(?:SKU|Product\s*(?:Code|Number)|Part\s*Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._-]*)/i
+          );
+
+          if (match) {
+            sku = match[1].trim();
           }
         }
 
         /*
          * ---------------------------------------------------------
-         * MAIN PRODUCT PRICE
-         *
-         * Example:
-         *
-         * <div class="price">
-         *   <span class="price__dollars has-promo">
-         *      $295
-         *   </span>
-         *   <span class="savings">$362</span>
-         * </div>
-         *
-         * Therefore:
-         *
-         * price = 295
-         * originalPrice = 362
+         * STRUCTURED DATA
          * ---------------------------------------------------------
+         *
+         * Repco may expose product information through JSON-LD.
+         *
+         * This is one of the safest fallback sources because it is
+         * explicitly associated with the product rather than a
+         * recommendation tile.
          */
 
-        const priceContainer = document.querySelector(
-          '.price__container'
+        let structuredPrice: number | null = null;
+        let structuredOriginalPrice: number | null = null;
+        let structuredSku: string | null = null;
+        let structuredAvailability:
+          | 'in_stock'
+          | 'out_of_stock'
+          | 'check_availability'
+          | null = null;
+
+        const jsonLdScripts = Array.from(
+          document.querySelectorAll(
+            'script[type="application/ld+json"]'
+          )
         );
+
+        const findProductObjects = (
+          value: unknown
+        ): any[] => {
+          const results: any[] = [];
+
+          const visit = (item: any): void => {
+            if (!item || typeof item !== 'object') {
+              return;
+            }
+
+            if (Array.isArray(item)) {
+              for (const child of item) {
+                visit(child);
+              }
+
+              return;
+            }
+
+            if (
+              item['@type'] === 'Product' ||
+              (Array.isArray(item['@type']) &&
+                item['@type'].includes('Product'))
+            ) {
+              results.push(item);
+            }
+
+            if (item['@graph']) {
+              visit(item['@graph']);
+            }
+          };
+
+          visit(value);
+
+          return results;
+        };
+
+        for (const script of jsonLdScripts) {
+          try {
+            const raw = script.textContent;
+
+            if (!raw) continue;
+
+            const parsed = JSON.parse(raw);
+            const products = findProductObjects(parsed);
+
+            for (const product of products) {
+              if (!structuredSku && product.sku) {
+                structuredSku = String(product.sku).trim();
+              }
+
+              const offers = Array.isArray(product.offers)
+                ? product.offers
+                : product.offers
+                  ? [product.offers]
+                  : [];
+
+              for (const offer of offers) {
+                if (
+                  structuredPrice === null &&
+                  offer?.price !== undefined
+                ) {
+                  const parsedPrice = parsePrice(
+                    String(offer.price)
+                  );
+
+                  if (parsedPrice !== null) {
+                    structuredPrice = parsedPrice;
+                  }
+                }
+
+                const availabilityText =
+                  String(offer?.availability || '');
+
+                if (
+                  structuredAvailability === null &&
+                  /outofstock/i.test(availabilityText)
+                ) {
+                  structuredAvailability = 'out_of_stock';
+                } else if (
+                  structuredAvailability === null &&
+                  /instock/i.test(availabilityText)
+                ) {
+                  structuredAvailability = 'in_stock';
+                }
+              }
+            }
+          } catch {
+            /*
+             * Ignore malformed/non-JSON script blocks.
+             */
+          }
+        }
+
+        /*
+         * ---------------------------------------------------------
+         * PRICE
+         * ---------------------------------------------------------
+         */
 
         let price: number | null = null;
         let originalPrice: number | null = null;
 
-        if (priceContainer) {
-          const currentPriceElement = priceContainer.querySelector(
-            '.price__dollars'
+        /*
+         * 1. Explicit Repco price container.
+         */
+        if (productRoot) {
+          const priceContainers = Array.from(
+            productRoot.querySelectorAll(
+              '.price__container, .product-price, .price'
+            )
           );
 
-          const savingsElement = priceContainer.querySelector(
-            '.savings'
+          for (const container of priceContainers) {
+            const containerText =
+              cleanText(container.textContent) || '';
+
+            if (!containerText) continue;
+
+            /*
+             * Current / selling price.
+             *
+             * Prefer explicit current-price classes first.
+             */
+            const currentSelectors = [
+              '.price__dollars.has-promo',
+              '.price__dollars',
+              '.sale-price',
+              '.current-price',
+              '.selling-price',
+              '[class*="sale-price" i]',
+              '[class*="current-price" i]',
+              '[class*="selling-price" i]',
+              '[class*="price__dollars" i]',
+            ];
+
+            for (const selector of currentSelectors) {
+              const elements = Array.from(
+                container.querySelectorAll(selector)
+              );
+
+              for (const element of elements) {
+                const candidate = parsePrice(
+                  element.textContent
+                );
+
+                if (candidate !== null) {
+                  price = candidate;
+                  addDiagnostic(
+                    priceSources,
+                    `DOM:${selector}`
+                  );
+                  break;
+                }
+              }
+
+              if (price !== null) break;
+            }
+
+            /*
+             * If no explicit current price was found, inspect all
+             * price-like elements inside this product price area.
+             */
+            if (price === null) {
+              const candidates = Array.from(
+                container.querySelectorAll(
+                  '[class*="price" i], [class*="amount" i], span, strong, b'
+                )
+              );
+
+              for (const element of candidates) {
+                const text = cleanText(element.textContent);
+
+                if (!text) continue;
+
+                const candidate = parsePrice(text);
+
+                if (candidate === null) continue;
+
+                /*
+                 * Avoid taking obvious old/saving/member prices.
+                 */
+                if (
+                  /saving|save|was|rrp|original|member/i.test(
+                    text
+                  )
+                ) {
+                  continue;
+                }
+
+                price = candidate;
+                addDiagnostic(
+                  priceSources,
+                  'DOM:price-container-fallback'
+                );
+                break;
+              }
+            }
+
+            /*
+             * Original / previous price.
+             */
+            const originalSelectors = [
+              '.savings',
+              '.was-price',
+              '.original-price',
+              '.rrp',
+              '[class*="was-price" i]',
+              '[class*="original-price" i]',
+              '[class*="rrp" i]',
+              '[class*="saving" i]',
+            ];
+
+            for (const selector of originalSelectors) {
+              const elements = Array.from(
+                container.querySelectorAll(selector)
+              );
+
+              for (const element of elements) {
+                const candidate = parsePrice(
+                  element.textContent
+                );
+
+                if (
+                  candidate !== null &&
+                  candidate !== price
+                ) {
+                  originalPrice = candidate;
+
+                  addDiagnostic(
+                    originalPriceSources,
+                    `DOM:${selector}`
+                  );
+
+                  break;
+                }
+              }
+
+              if (originalPrice !== null) break;
+            }
+
+            if (price !== null) break;
+          }
+        }
+
+        /*
+         * 2. Product-root price elements.
+         */
+        if (price === null && productRoot) {
+          const priceElements = Array.from(
+            productRoot.querySelectorAll(
+              '[class*="price" i]'
+            )
           );
 
-          price = parsePrice(
-            currentPriceElement?.textContent
+          for (const element of priceElements) {
+            const text = cleanText(element.textContent);
+
+            if (!text) continue;
+
+            /*
+             * Do not accept huge containers containing dozens of
+             * unrelated prices.
+             */
+            if (text.length > 300) continue;
+
+            if (
+              /member|saving|save|was|rrp|original/i.test(text)
+            ) {
+              continue;
+            }
+
+            const candidate = parsePrice(text);
+
+            if (candidate !== null) {
+              price = candidate;
+
+              addDiagnostic(
+                priceSources,
+                'DOM:product-root-price'
+              );
+
+              break;
+            }
+          }
+        }
+
+        /*
+         * 3. Meta price.
+         */
+        if (price === null) {
+          const metaPriceSelectors = [
+            'meta[property="product:price:amount"]',
+            'meta[itemprop="price"]',
+            'meta[name="price"]',
+          ];
+
+          for (const selector of metaPriceSelectors) {
+            const value = getAttribute(selector, 'content');
+
+            const candidate = parsePrice(value);
+
+            if (candidate !== null) {
+              price = candidate;
+
+              addDiagnostic(
+                priceSources,
+                `META:${selector}`
+              );
+
+              break;
+            }
+          }
+        }
+
+        /*
+         * 4. JSON-LD.
+         */
+        if (price === null && structuredPrice !== null) {
+          price = structuredPrice;
+
+          addDiagnostic(
+            priceSources,
+            'JSON-LD:offers.price'
+          );
+        }
+
+        /*
+         * ---------------------------------------------------------
+         * ORIGINAL PRICE FALLBACK
+         * ---------------------------------------------------------
+         */
+
+        if (originalPrice === null && productRoot) {
+          const rootText =
+            cleanText(productRoot.textContent) || '';
+
+          /*
+           * Look specifically for:
+           *
+           * Was $362
+           * RRP $362
+           * Originally $362
+           * Save ... from $362
+           */
+          const originalPatterns = [
+            /\bwas\s*(?:NZD|NZ|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+            /\brrp\s*(?:NZD|NZ|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+            /\boriginal(?:ly)?\s*(?:price\s*)?(?:NZD|NZ|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+          ];
+
+          for (const pattern of originalPatterns) {
+            const match = rootText.match(pattern);
+
+            if (match) {
+              const candidate = parsePrice(match[1]);
+
+              if (
+                candidate !== null &&
+                candidate !== price
+              ) {
+                originalPrice = candidate;
+
+                addDiagnostic(
+                  originalPriceSources,
+                  'TEXT:original-price'
+                );
+
+                break;
+              }
+            }
+          }
+        }
+
+        /*
+         * If the Repco price container gives two prices but the
+         * original-price class isn't available, infer the higher
+         * value as the original price.
+         */
+        if (
+          originalPrice === null &&
+          productRoot &&
+          price !== null
+        ) {
+          const priceContainers = Array.from(
+            productRoot.querySelectorAll(
+              '.price__container, .product-price, .price'
+            )
           );
 
-          originalPrice = parsePrice(
-            savingsElement?.textContent
-          );
+          for (const container of priceContainers) {
+            const prices = parseAllPrices(
+              container.textContent
+            );
+
+            const higherPrices = prices.filter(
+              (candidate) => candidate > price!
+            );
+
+            if (higherPrices.length > 0) {
+              originalPrice = Math.max(...higherPrices);
+
+              addDiagnostic(
+                originalPriceSources,
+                'DOM:price-container-higher-price'
+              );
+
+              break;
+            }
+          }
         }
 
         /*
          * ---------------------------------------------------------
          * MEMBER PRICE
-         *
-         * We deliberately search the main product area rather than
-         * the entire page, because the page contains many other
-         * products with prices.
-         *
-         * Example:
-         *
-         * $300
-         * $209
-         * Member Price
-         *
-         * or similar promotional markup.
          * ---------------------------------------------------------
+         *
+         * IMPORTANT:
+         *
+         * Do NOT search the whole page.
+         *
+         * Repco pages can contain member prices in recommendation
+         * products, which would otherwise be incorrectly assigned to
+         * the main product.
          */
 
         let memberPrice: number | null = null;
 
-        const productDetails =
-          document.querySelector('.product-details');
+        if (productRoot) {
+          /*
+           * Search elements whose text explicitly mentions
+           * "Member Price".
+           */
+          const memberElements = Array.from(
+            productRoot.querySelectorAll('*')
+          ).filter((element) => {
+            const text =
+              cleanText(element.textContent) || '';
 
-        const productDetailsText =
-          productDetails?.textContent || '';
+            return (
+              /member\s*price/i.test(text) &&
+              text.length < 500
+            );
+          });
 
-        const memberMatch = productDetailsText.match(
-          /Member Price\s*\$?\s*(\d+(?:\.\d{1,2})?)/i
-        );
+          for (const element of memberElements) {
+            const text =
+              cleanText(element.textContent) || '';
 
-        if (memberMatch) {
-          memberPrice = Number(memberMatch[1]);
+            /*
+             * First try the same element.
+             */
+            const directPrices = parseAllPrices(text);
+
+            if (directPrices.length > 0) {
+              /*
+               * Usually the member-price label is followed by
+               * the member price.
+               */
+              memberPrice = directPrices[0];
+
+              addDiagnostic(
+                memberPriceSources,
+                'DOM:member-price-label'
+              );
+
+              break;
+            }
+
+            /*
+             * Then inspect parent / sibling container.
+             */
+            const parent = element.parentElement;
+
+            if (parent) {
+              const parentText =
+                cleanText(parent.textContent) || '';
+
+              const parentPrices =
+                parseAllPrices(parentText);
+
+              if (parentPrices.length > 0) {
+                memberPrice = parentPrices[0];
+
+                addDiagnostic(
+                  memberPriceSources,
+                  'DOM:member-price-parent'
+                );
+
+                break;
+              }
+            }
+          }
         }
 
         /*
-         * Some Repco pages expose the member price separately from
-         * the main price. Look for common member-price elements too.
+         * Text-based member-price fallback.
          */
+        if (memberPrice === null && productRoot) {
+          const rootText =
+            cleanText(productRoot.textContent) || '';
 
-        if (memberPrice === null && productDetails) {
-          const memberElements = Array.from(
-            productDetails.querySelectorAll('*')
-          ).filter((element) =>
-            /member price/i.test(element.textContent || '')
+          const memberMatch = rootText.match(
+            /member\s*price[\s:]*((?:NZD|NZ|\$)\s*[\d,]+(?:\.\d{1,2})?)/i
           );
 
-          for (const element of memberElements) {
-            const parentText =
-              element.parentElement?.textContent || '';
-
-            const match = parentText.match(
-              /Member Price\s*\$?\s*(\d+(?:\.\d{1,2})?)/i
+          if (memberMatch) {
+            const candidate = parsePrice(
+              memberMatch[1]
             );
 
-            if (match) {
-              memberPrice = Number(match[1]);
-              break;
+            if (candidate !== null) {
+              memberPrice = candidate;
+
+              addDiagnostic(
+                memberPriceSources,
+                'TEXT:member-price'
+              );
             }
           }
         }
@@ -207,9 +897,6 @@ export class RepcoAdapter {
          * ---------------------------------------------------------
          * AVAILABILITY
          * ---------------------------------------------------------
-         *
-         * We specifically look at the product eligibility/store
-         * section rather than searching the whole page.
          */
 
         let availability:
@@ -217,35 +904,80 @@ export class RepcoAdapter {
           | 'out_of_stock'
           | 'check_availability'
           | null = null;
-        
-        const eligibility = document.querySelector(
-          '.product-eligibility'
-        );
-        
-        // Repco's actual store stock status is inside:
-        // .product-eligibility .stock-status
-        const stockStatusElement = eligibility?.querySelector(
-          '.stock-status'
-        );
-        
-        const stockStatusText =
-          stockStatusElement?.textContent?.replace(/\s+/g, ' ').trim() || '';
-        
-        if (/out\s*of\s*stock/i.test(stockStatusText)) {
-          availability = 'out_of_stock';
-        } else if (/in\s*stock/i.test(stockStatusText)) {
-          availability = 'in_stock';
-        } else {
-          // Fall back to the wider product eligibility area
-          // if Repco changes the HTML structure.
-          const availabilityText =
-            eligibility?.textContent || '';
-        
-          if (/out\s*of\s*stock/i.test(availabilityText)) {
+
+        /*
+         * Prefer Repco's product eligibility area.
+         */
+        const eligibilitySelectors = [
+          '.product-eligibility',
+          '[data-testid*="eligibility" i]',
+          '[class*="product-eligibility" i]',
+          '[class*="availability" i]',
+          '[class*="stock-status" i]',
+        ];
+
+        let eligibility: Element | null = null;
+
+        for (const selector of eligibilitySelectors) {
+          const element =
+            document.querySelector(selector);
+
+          if (element) {
+            eligibility = element;
+            break;
+          }
+        }
+
+        if (eligibility) {
+          const stockStatus =
+            cleanText(eligibility.textContent) || '';
+
+          if (
+            /\bout\s*of\s*stock\b/i.test(stockStatus) ||
+            /\bunavailable\b/i.test(stockStatus)
+          ) {
             availability = 'out_of_stock';
-          } else if (/in\s*stock/i.test(availabilityText)) {
+          } else if (
+            /\bin\s*stock\b/i.test(stockStatus) ||
+            /\bavailable\b/i.test(stockStatus)
+          ) {
             availability = 'in_stock';
-          } else if (/check\s*availability/i.test(availabilityText)) {
+          } else if (
+            /check\s*availability/i.test(stockStatus)
+          ) {
+            availability = 'check_availability';
+          }
+        }
+
+        /*
+         * Structured-data fallback.
+         */
+        if (
+          availability === null &&
+          structuredAvailability !== null
+        ) {
+          availability = structuredAvailability;
+        }
+
+        /*
+         * Product-root fallback.
+         */
+        if (availability === null && productRoot) {
+          const productText =
+            cleanText(productRoot.textContent) || '';
+
+          if (
+            /\bout\s*of\s*stock\b/i.test(productText) ||
+            /\bunavailable\b/i.test(productText)
+          ) {
+            availability = 'out_of_stock';
+          } else if (
+            /\bin\s*stock\b/i.test(productText)
+          ) {
+            availability = 'in_stock';
+          } else if (
+            /check\s*availability/i.test(productText)
+          ) {
             availability = 'check_availability';
           }
         }
@@ -258,39 +990,183 @@ export class RepcoAdapter {
 
         let store: string | null = null;
 
-        const storeElement = document.querySelector(
-          '.product-eligibility .store-name'
-        );
+        const storeSelectors = [
+          '.product-eligibility .store-name',
+          '.store-name',
+          '[data-testid*="store-name" i]',
+          '[class*="store-name" i]',
+        ];
 
-        if (storeElement) {
-          store = cleanText(storeElement.textContent);
+        for (const selector of storeSelectors) {
+          const value = getText(selector);
+
+          if (value) {
+            store = value;
+            break;
+          }
+        }
+
+        /*
+         * Store fallback from product eligibility text.
+         */
+        if (!store && eligibility) {
+          const eligibilityText =
+            cleanText(eligibility.textContent) || '';
+
+          /*
+           * Look for common store wording without assuming that
+           * North Shore is always returned.
+           */
+          const storeMatch = eligibilityText.match(
+            /(?:store|pickup|pick\s*up)[\s:|-]+([A-Za-z][A-Za-z0-9 '&.-]{2,50})/i
+          );
+
+          if (storeMatch) {
+            store = cleanText(storeMatch[1]);
+          }
+        }
+
+        /*
+         * ---------------------------------------------------------
+         * FINAL NORMALISATION
+         * ---------------------------------------------------------
+         */
+
+        /*
+         * If originalPrice equals the current price, it isn't useful
+         * as an original price.
+         */
+        if (
+          originalPrice !== null &&
+          price !== null &&
+          originalPrice === price
+        ) {
+          originalPrice = null;
+        }
+
+        /*
+         * A member price equal to the main price isn't really a
+         * separate member price.
+         */
+        if (
+          memberPrice !== null &&
+          price !== null &&
+          memberPrice === price
+        ) {
+          memberPrice = null;
+        }
+
+        /*
+         * If the member price is greater than the normal selling
+         * price, it is probably not a member price.
+         */
+        if (
+          memberPrice !== null &&
+          price !== null &&
+          memberPrice > price
+        ) {
+          memberPrice = null;
+        }
+
+        /*
+         * If the original price is lower than the selling price,
+         * discard it as an invalid original price.
+         */
+        if (
+          originalPrice !== null &&
+          price !== null &&
+          originalPrice < price
+        ) {
+          originalPrice = null;
         }
 
         return {
           name,
-          sku,
+          sku: sku || structuredSku,
           price,
           originalPrice,
           memberPrice,
           availability,
           store,
-        };
+          diagnostics: {
+            priceSources,
+            memberPriceSources,
+            originalPriceSources,
+          },
+        } satisfies ExtractedProduct;
       });
+
+      /*
+       * ---------------------------------------------------------
+       * LOG EXTRACTION RESULT
+       * ---------------------------------------------------------
+       *
+       * This is intentionally useful during the current debugging
+       * phase. Once scraping is stable, the diagnostic detail can be
+       * reduced.
+       */
+      logger.info(
+        `Repco extraction result for ${url}: ${JSON.stringify({
+          name: product.name,
+          sku: product.sku,
+          price: product.price,
+          originalPrice: product.originalPrice,
+          memberPrice: product.memberPrice,
+          availability: product.availability,
+          store: product.store,
+          priceSources: product.diagnostics.priceSources,
+          memberPriceSources:
+            product.diagnostics.memberPriceSources,
+          originalPriceSources:
+            product.diagnostics.originalPriceSources,
+        })}`
+      );
+
+      /*
+       * ---------------------------------------------------------
+       * WARN ABOUT MISSING IMPORTANT DATA
+       * ---------------------------------------------------------
+       */
+
+      if (product.price === null) {
+        logger.warn(
+          `Repco price could not be extracted for ${url}`
+        );
+      }
+
+      if (!product.name) {
+        logger.warn(
+          `Repco product name could not be extracted for ${url}`
+        );
+      }
+
+      if (!product.sku) {
+        logger.warn(
+          `Repco SKU could not be extracted for ${url}`
+        );
+      }
 
       /*
        * ---------------------------------------------------------
        * VERIFY STORE
        * ---------------------------------------------------------
-       *
-       * The page should ideally report North Shore.
-       * We don't silently pretend another store is North Shore.
        */
 
-      if (product.store && product.store !== this.storeName) {
+      if (
+        product.store &&
+        product.store.toLowerCase() !==
+          this.storeName.toLowerCase()
+      ) {
         logger.warn(
           `Repco returned store "${product.store}" instead of "${this.storeName}"`
         );
       }
+
+      /*
+       * ---------------------------------------------------------
+       * RETURN API MODEL
+       * ---------------------------------------------------------
+       */
 
       return {
         site: 'repco',
