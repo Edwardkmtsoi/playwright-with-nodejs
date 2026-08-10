@@ -1,5 +1,5 @@
 import { Page } from 'playwright';
-import logger from '../config/logger';
+import logger from '../../config/logger';
 import { browserService } from '../browser.service';
 
 export interface RepcoProduct {
