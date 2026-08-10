@@ -957,6 +957,11 @@ export class RepcoAdapter {
  * MEMBER PRICE (Improved)
  * ---------------------------------------------------------
  */
+/*
+ * ---------------------------------------------------------
+ * MEMBER PRICE (Improved & Fixed)
+ * ---------------------------------------------------------
+ */
 
 let memberPrice: number | null = null;
 
@@ -964,27 +969,23 @@ if (productRoot) {
   const root = productRoot;
 
   /*
-   * 1. Elements explicitly mentioning member pricing.
-   *    Handles:
-   *    - "Member Price $295"
-   *    - "Repco Rewards Member $295"
-   *    - "Member Deal $295"
+   * 1. Find elements whose text mentions member pricing.
+   *    We cannot use :matches-text(), so we manually filter.
    */
-  const memberLabelSelectors = [
-    '*:matches-text(/member price/i)',
-    '*:matches-text(/repco rewards member/i)',
-    '*:matches-text(/member deal/i)',
-    '*:matches-text(/rewards member/i)',
-  ];
-
-  const memberLabelElements = Array.from(
-    root.querySelectorAll(memberLabelSelectors.join(', '))
-  );
+  const memberLabelElements = Array.from(root.querySelectorAll('*')).filter(el => {
+    const text = cleanText(el.textContent) || '';
+    return (
+      /member price/i.test(text) ||
+      /repco rewards member/i.test(text) ||
+      /member deal/i.test(text) ||
+      /rewards member/i.test(text)
+    );
+  });
 
   for (const el of memberLabelElements) {
     const text = cleanText(el.textContent) || '';
 
-    // Try direct extraction from the same element
+    // Direct extraction
     const direct = parseAllPrices(text);
     if (direct.length > 0) {
       memberPrice = direct[0];
@@ -992,10 +993,9 @@ if (productRoot) {
       break;
     }
 
-    // Try sibling elements (Repco often puts the price AFTER the label)
-    const siblingPrices = parseAllPrices(
-      cleanText(el.nextElementSibling?.textContent) || ''
-    );
+    // Sibling extraction
+    const siblingText = cleanText(el.nextElementSibling?.textContent) || '';
+    const siblingPrices = parseAllPrices(siblingText);
 
     if (siblingPrices.length > 0) {
       memberPrice = siblingPrices[0];
@@ -1003,28 +1003,19 @@ if (productRoot) {
       break;
     }
 
-    // Try searching inside the same container
-    const containerPrices = parseAllPrices(
-      cleanText(el.parentElement?.textContent) || ''
-    );
+    // Container extraction
+    const containerText = cleanText(el.parentElement?.textContent) || '';
+    const containerPrices = parseAllPrices(containerText).filter(p => p !== price);
 
     if (containerPrices.length > 0) {
-      // Avoid accidentally picking the normal price
-      const filtered = containerPrices.filter(p => p !== price);
-      if (filtered.length > 0) {
-        memberPrice = filtered[0];
-        addDiagnostic(memberPriceSources, 'DOM:member-label-container');
-        break;
-      }
+      memberPrice = containerPrices[0];
+      addDiagnostic(memberPriceSources, 'DOM:member-label-container');
+      break;
     }
   }
 
   /*
-   * 2. Dedicated member-price containers.
-   *    Repco sometimes uses:
-   *    - .member-price
-   *    - .price--member
-   *    - .promo-member
+   * 2. Dedicated member-price containers
    */
   if (memberPrice === null) {
     const memberContainers = Array.from(
@@ -1034,11 +1025,10 @@ if (productRoot) {
     );
 
     for (const el of memberContainers) {
-      const prices = parseAllPrices(cleanText(el.textContent) || '');
-      const filtered = prices.filter(p => p !== price);
+      const prices = parseAllPrices(cleanText(el.textContent) || '').filter(p => p !== price);
 
-      if (filtered.length > 0) {
-        memberPrice = filtered[0];
+      if (prices.length > 0) {
+        memberPrice = prices[0];
         addDiagnostic(memberPriceSources, 'DOM:member-container');
         break;
       }
@@ -1046,16 +1036,17 @@ if (productRoot) {
   }
 
   /*
-   * 3. JSON-LD fallback (Repco sometimes exposes member price in offers)
+   * 3. JSON-LD fallback
    */
-  if (memberPrice === null && structuredPrice !== null) {
-    // If structured price is LOWER than DOM price, it's usually the member price
-    if (price !== null && structuredPrice < price) {
+  if (memberPrice === null && structuredPrice !== null && price !== null) {
+    if (structuredPrice < price) {
       memberPrice = structuredPrice;
       addDiagnostic(memberPriceSources, 'JSON-LD:offers.memberPrice');
     }
   }
 }
+
+
 
         ``` let memberPrice: number | null = null;
 
