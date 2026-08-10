@@ -217,22 +217,37 @@ export class RepcoAdapter {
           | 'out_of_stock'
           | 'check_availability'
           | null = null;
-
+        
         const eligibility = document.querySelector(
           '.product-eligibility'
         );
-
-        const availabilityText =
-          eligibility?.textContent ||
-          productDetails?.textContent ||
-          '';
-
-        if (/out\s*of\s*stock/i.test(availabilityText)) {
+        
+        // Repco's actual store stock status is inside:
+        // .product-eligibility .stock-status
+        const stockStatusElement = eligibility?.querySelector(
+          '.stock-status'
+        );
+        
+        const stockStatusText =
+          stockStatusElement?.textContent?.replace(/\s+/g, ' ').trim() || '';
+        
+        if (/out\s*of\s*stock/i.test(stockStatusText)) {
           availability = 'out_of_stock';
-        } else if (/in\s*stock/i.test(availabilityText)) {
+        } else if (/in\s*stock/i.test(stockStatusText)) {
           availability = 'in_stock';
-        } else if (/check\s*availability/i.test(availabilityText)) {
-          availability = 'check_availability';
+        } else {
+          // Fall back to the wider product eligibility area
+          // if Repco changes the HTML structure.
+          const availabilityText =
+            eligibility?.textContent || '';
+        
+          if (/out\s*of\s*stock/i.test(availabilityText)) {
+            availability = 'out_of_stock';
+          } else if (/in\s*stock/i.test(availabilityText)) {
+            availability = 'in_stock';
+          } else if (/check\s*availability/i.test(availabilityText)) {
+            availability = 'check_availability';
+          }
         }
 
         /*
