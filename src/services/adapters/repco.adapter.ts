@@ -25,6 +25,107 @@ export class RepcoAdapter {
   private readonly storeName = 'North Shore';
   private readonly postalCode = '0626';
 
+  /*
+   * -----------------------------------------------------------------
+   * STORE SELECTION
+   * -----------------------------------------------------------------
+   *
+   * Repco's storefront (SAP Hybris) does NOT show real stock/store
+   * data to a session that hasn't selected a store yet. A brand new
+   * Playwright browser context has no cookies, so the product page
+   * renders a "Store Locator" prompt instead of the
+   * `.product-eligibility` block this adapter depends on for
+   * availability and store name.
+   *
+   * The site exposes a `/store-finder/setstore` action wired to
+   * "Select Store" / "Set As My Store" buttons inside the store
+   * locator widget. Rather than reverse-engineering the exact
+   * request payload for that endpoint (which is undocumented and can
+   * change), this drives the real UI flow once per browser session:
+   * open the store finder, search the target postcode, and click the
+   * matching store's select button. This is slower but far more
+   * resilient to markup/JS changes than replaying a raw fetch/XHR.
+   *
+   * IMPORTANT: the selectors below are a best-effort based on the
+   * static markup Repco serves (verified via HTML fetch on
+   * 2026-08-10). If Repco changes their store-locator markup this
+   * step may start failing silently (it's wrapped in try/catch and
+   * just logs a warning). If that happens, re-record the flow with:
+   *
+   *   npx playwright codegen https://www.repco.co.nz
+   *
+   * ...open the store finder, search "0626", select North Shore, and
+   * copy the resulting selectors in here.
+   */
+  private async ensureStoreSelected(page: Page): Promise<void> {
+    try {
+      // If a store is already selected for this session (e.g. cookie
+      // reused from a previous run), skip re-selecting it.
+      const existingStoreName = await page
+        .locator('.product-eligibility .store-name, .tab-store-change .store-name')
+        .first()
+        .textContent({ timeout: 3000 })
+        .catch(() => null);
+
+      if (
+        existingStoreName &&
+        existingStoreName.trim().toLowerCase() === this.storeName.toLowerCase()
+      ) {
+        logger.debug(`Repco store already set to ${this.storeName}; skipping store selection`);
+        return;
+      }
+
+      logger.info(`Repco store not set (or set to something else) — selecting ${this.storeName}`);
+
+      // Open the store finder / "Set my store" widget.
+      const openStoreFinder = page
+        .locator(
+          '.js-store-finder-button, .js-repco-store-finder, a:has-text("Set my store"), a:has-text("Tap here to set your store")'
+        )
+        .first();
+
+      await openStoreFinder.click({ timeout: 8000 });
+
+      // Type the postcode into the store locator search field.
+      const searchInput = page
+        .locator(
+          'input[placeholder*="postcode" i], input[placeholder*="suburb" i], input[name*="postcode" i]'
+        )
+        .first();
+
+      await searchInput.waitFor({ timeout: 8000 });
+      await searchInput.fill(this.postalCode);
+      await page.keyboard.press('Enter');
+
+      // Wait for the store results list to contain our target store,
+      // then click its "Select Store" / "Set As My Store" button.
+      const storeRow = page
+        .locator(`text=${this.storeName}`)
+        .first();
+
+      await storeRow.waitFor({ timeout: 10000 });
+
+      const selectButton = page
+        .locator('a, button')
+        .filter({ hasText: /select store|set as my store/i })
+        .first();
+
+      await selectButton.click({ timeout: 8000 });
+
+      // Give the page a moment to apply the store cookie/session and
+      // re-render (this may trigger an internal navigation/reload).
+      await page.waitForTimeout(2000);
+
+      logger.info(`Repco store selection completed for ${this.storeName}`);
+    } catch (error) {
+      logger.warn(
+        `Repco store selection step failed — availability/store data may be incomplete for this scrape: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   async scrapeProduct(url: string): Promise<RepcoProduct> {
     let page: Page | null = null;
 
@@ -35,6 +136,20 @@ export class RepcoAdapter {
       logger.info(
         `Scraping Repco product: ${url} using store ${this.storeName} (${this.postalCode})`
       );
+
+      /*
+       * Land on the homepage first so the store-locator widget is
+       * available in a predictable place, select the store there,
+       * and only then navigate to the actual product page — that way
+       * the product page's initial server render already reflects
+       * the selected store's stock/availability.
+       */
+      await page.goto('https://www.repco.co.nz/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000,
+      });
+
+      await this.ensureStoreSelected(page);
 
       await page.goto(url, {
         waitUntil: 'domcontentloaded',
