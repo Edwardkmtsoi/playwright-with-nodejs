@@ -952,7 +952,112 @@ export class RepcoAdapter {
          * main product. All matching is scoped to productRoot.
          */
 
-        let memberPrice: number | null = null;
+      /*
+ * ---------------------------------------------------------
+ * MEMBER PRICE (Improved)
+ * ---------------------------------------------------------
+ */
+
+let memberPrice: number | null = null;
+
+if (productRoot) {
+  const root = productRoot;
+
+  /*
+   * 1. Elements explicitly mentioning member pricing.
+   *    Handles:
+   *    - "Member Price $295"
+   *    - "Repco Rewards Member $295"
+   *    - "Member Deal $295"
+   */
+  const memberLabelSelectors = [
+    '*:matches-text(/member price/i)',
+    '*:matches-text(/repco rewards member/i)',
+    '*:matches-text(/member deal/i)',
+    '*:matches-text(/rewards member/i)',
+  ];
+
+  const memberLabelElements = Array.from(
+    root.querySelectorAll(memberLabelSelectors.join(', '))
+  );
+
+  for (const el of memberLabelElements) {
+    const text = cleanText(el.textContent) || '';
+
+    // Try direct extraction from the same element
+    const direct = parseAllPrices(text);
+    if (direct.length > 0) {
+      memberPrice = direct[0];
+      addDiagnostic(memberPriceSources, 'DOM:member-label-direct');
+      break;
+    }
+
+    // Try sibling elements (Repco often puts the price AFTER the label)
+    const siblingPrices = parseAllPrices(
+      cleanText(el.nextElementSibling?.textContent) || ''
+    );
+
+    if (siblingPrices.length > 0) {
+      memberPrice = siblingPrices[0];
+      addDiagnostic(memberPriceSources, 'DOM:member-label-sibling');
+      break;
+    }
+
+    // Try searching inside the same container
+    const containerPrices = parseAllPrices(
+      cleanText(el.parentElement?.textContent) || ''
+    );
+
+    if (containerPrices.length > 0) {
+      // Avoid accidentally picking the normal price
+      const filtered = containerPrices.filter(p => p !== price);
+      if (filtered.length > 0) {
+        memberPrice = filtered[0];
+        addDiagnostic(memberPriceSources, 'DOM:member-label-container');
+        break;
+      }
+    }
+  }
+
+  /*
+   * 2. Dedicated member-price containers.
+   *    Repco sometimes uses:
+   *    - .member-price
+   *    - .price--member
+   *    - .promo-member
+   */
+  if (memberPrice === null) {
+    const memberContainers = Array.from(
+      root.querySelectorAll(
+        '.member-price, .price--member, [class*="member" i], [data-testid*="member" i]'
+      )
+    );
+
+    for (const el of memberContainers) {
+      const prices = parseAllPrices(cleanText(el.textContent) || '');
+      const filtered = prices.filter(p => p !== price);
+
+      if (filtered.length > 0) {
+        memberPrice = filtered[0];
+        addDiagnostic(memberPriceSources, 'DOM:member-container');
+        break;
+      }
+    }
+  }
+
+  /*
+   * 3. JSON-LD fallback (Repco sometimes exposes member price in offers)
+   */
+  if (memberPrice === null && structuredPrice !== null) {
+    // If structured price is LOWER than DOM price, it's usually the member price
+    if (price !== null && structuredPrice < price) {
+      memberPrice = structuredPrice;
+      addDiagnostic(memberPriceSources, 'JSON-LD:offers.memberPrice');
+    }
+  }
+}
+
+        ``` let memberPrice: number | null = null;
 
         if (productRoot) {
           /*
@@ -1046,7 +1151,7 @@ export class RepcoAdapter {
               );
             }
           }
-        }
+        }```
 
         /*
          * ---------------------------------------------------------
