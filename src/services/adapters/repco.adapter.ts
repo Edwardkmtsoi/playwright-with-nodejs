@@ -969,83 +969,221 @@ if (productRoot) {
   const root = productRoot;
 
   /*
-   * 1. Find elements whose text mentions member pricing.
-   *    We cannot use :matches-text(), so we manually filter.
+   * Repco's member-price markup is different from a normal promotion.
+   *
+   * Example from the supplied HTML:
+   *
+   *   <div class="price__container">
+   *     <div class="price">
+   *       <span class="price__dollars">$64</span>
+   *     </div>
+   *     <div class="promotion-price">
+   *       <div class="price">$38</div>
+   *       <div class="promotion-label">Member Price</div>
+   *     </div>
+   *   </div>
+   *
+   * The important detail is that the $38 is NOT inside the main
+   * .price__dollars element. It is inside a sibling .promotion-price
+   * container and is identified by .promotion-label.
+   *
+   * Therefore member-price extraction should be deterministic:
+   *   1. Find a .promotion-price container.
+   *   2. Confirm its label says "Member Price" / member deal.
+   *   3. Extract the .price inside THAT SAME container.
+   *
+   * Do not search all elements containing the word "member". Repco's
+   * page contains Rewards/member navigation and recommendation tiles
+   * outside the main product.
    */
-  const memberLabelElements = Array.from(root.querySelectorAll('*')).filter(el => {
-    const text = cleanText(el.textContent) || '';
-    return (
-      /member price/i.test(text) ||
-      /repco rewards member/i.test(text) ||
-      /member deal/i.test(text) ||
-      /rewards member/i.test(text)
+
+  /*
+   * 1. Exact Repco promotion-price structure.
+   *
+   * This is the primary source and should handle the supplied
+   * Castrol HTML: normal price = $64, member price = $38.
+   */
+  const promotionContainers = Array.from(
+    root.querySelectorAll(
+      '.price__container .promotion-price, .promotion-price'
+    )
+  );
+
+  for (const container of promotionContainers) {
+    const label =
+      cleanText(
+        container.querySelector('.promotion-label')?.textContent
+      ) || '';
+
+    if (
+      !/member\s*price/i.test(label) &&
+      !/member\s*deal/i.test(label) &&
+      !/rewards\s*member/i.test(label)
+    ) {
+      continue;
+    }
+
+    /*
+     * Prefer the dedicated .price element inside the promotion
+     * container. This avoids accidentally taking the normal product
+     * price from the parent .price__container.
+     */
+    const promotionPriceElements = Array.from(
+      container.querySelectorAll('.price')
     );
-  });
 
-  for (const el of memberLabelElements) {
-    const text = cleanText(el.textContent) || '';
+    for (const element of promotionPriceElements) {
+      const candidate = parsePrice(element.textContent);
 
-    // Direct extraction
-    const direct = parseAllPrices(text);
-    if (direct.length > 0) {
-      memberPrice = direct[0];
-      addDiagnostic(memberPriceSources, 'DOM:member-label-direct');
+      if (
+        candidate !== null &&
+        (price === null || candidate < price)
+      ) {
+        memberPrice = candidate;
+        addDiagnostic(
+          memberPriceSources,
+          'DOM:.promotion-price.member-price'
+        );
+        break;
+      }
+    }
+
+    if (memberPrice !== null) {
       break;
     }
 
-    // Sibling extraction
-    const siblingText = cleanText(el.nextElementSibling?.textContent) || '';
-    const siblingPrices = parseAllPrices(siblingText);
+    /*
+     * Fallback for a slightly changed markup where the promotion
+     * container still has the member label but the price is not
+     * wrapped in .price.
+     */
+    const promotionText =
+      cleanText(container.textContent) || '';
 
-    if (siblingPrices.length > 0) {
-      memberPrice = siblingPrices[0];
-      addDiagnostic(memberPriceSources, 'DOM:member-label-sibling');
-      break;
-    }
+    const promotionPrices = parseAllPrices(promotionText).filter(
+      (candidate) => price === null || candidate < price
+    );
 
-    // Container extraction
-    const containerText = cleanText(el.parentElement?.textContent) || '';
-    const containerPrices = parseAllPrices(containerText).filter(p => p !== price);
-
-    if (containerPrices.length > 0) {
-      memberPrice = containerPrices[0];
-      addDiagnostic(memberPriceSources, 'DOM:member-label-container');
+    if (promotionPrices.length > 0) {
+      memberPrice = promotionPrices[0];
+      addDiagnostic(
+        memberPriceSources,
+        'DOM:.promotion-price.member-price-fallback'
+      );
       break;
     }
   }
 
   /*
-   * 2. Dedicated member-price containers
+   * 2. Attribute-based fallback.
+   *
+   * Keep this deliberately narrow so arbitrary member-related
+   * navigation elements cannot become the product's member price.
    */
   if (memberPrice === null) {
-    const memberContainers = Array.from(
-      root.querySelectorAll(
-        '.member-price, .price--member, [class*="member" i], [data-testid*="member" i]'
-      )
-    );
+    const attributeSelectors = [
+      '[data-member-price]',
+      '[data-memberprice]',
+      '[data-rewards-price]',
+    ];
 
-    for (const el of memberContainers) {
-      const prices = parseAllPrices(cleanText(el.textContent) || '').filter(p => p !== price);
+    for (const selector of attributeSelectors) {
+      const elements = Array.from(root.querySelectorAll(selector));
 
-      if (prices.length > 0) {
-        memberPrice = prices[0];
-        addDiagnostic(memberPriceSources, 'DOM:member-container');
+      for (const element of elements) {
+        const value =
+          element.getAttribute('data-member-price') ??
+          element.getAttribute('data-memberprice') ??
+          element.getAttribute('data-rewards-price');
+
+        const candidate = parsePrice(value);
+
+        if (
+          candidate !== null &&
+          (price === null || candidate < price)
+        ) {
+          memberPrice = candidate;
+          addDiagnostic(
+            memberPriceSources,
+            `DOM:${selector}`
+          );
+          break;
+        }
+      }
+
+      if (memberPrice !== null) {
         break;
       }
     }
   }
 
   /*
-   * 3. JSON-LD fallback
+   * 3. Conservative generic fallback.
+   *
+   * Some Repco templates may use a member-specific class instead of
+   * .promotion-price. Only accept an element when:
+   *   - its own text identifies it as member pricing, AND
+   *   - it contains exactly the price we need, AND
+   *   - that price is below the normal selling price.
+   *
+   * This is intentionally much narrower than the previous
+   * [class*="member"] search.
    */
-  if (memberPrice === null && structuredPrice !== null && price !== null) {
-    if (structuredPrice < price) {
-      memberPrice = structuredPrice;
-      addDiagnostic(memberPriceSources, 'JSON-LD:offers.memberPrice');
+  if (memberPrice === null) {
+    const memberSelectors = [
+      '.member-price',
+      '.price--member',
+      '[data-testid*="member-price" i]',
+      '[class*="member-price" i]',
+      '[class*="member_price" i]',
+    ];
+
+    for (const selector of memberSelectors) {
+      const elements = Array.from(root.querySelectorAll(selector));
+
+      for (const element of elements) {
+        const text = cleanText(element.textContent) || '';
+
+        if (
+          !/member\s*price|member\s*deal|rewards\s*member/i.test(
+            text
+          )
+        ) {
+          continue;
+        }
+
+        const prices = parseAllPrices(text).filter(
+          (candidate) => price === null || candidate < price
+        );
+
+        if (prices.length > 0) {
+          memberPrice = prices[0];
+          addDiagnostic(
+            memberPriceSources,
+            `DOM:${selector}`
+          );
+          break;
+        }
+      }
+
+      if (memberPrice !== null) {
+        break;
+      }
     }
   }
-}
 
+  /*
+   * IMPORTANT:
+   *
+   * Do NOT infer memberPrice from JSON-LD's normal offers.price.
+   * Repco's Product JSON-LD in the supplied member-price HTML says
+   * $64, which is the normal product price, while the actual member
+   * price is $38 in the separate .promotion-price block.
+   *
+   * Treating structuredPrice as a member price can therefore produce
+   * incorrect results.
+   */
+}
         /*
          * ---------------------------------------------------------
          * AVAILABILITY
