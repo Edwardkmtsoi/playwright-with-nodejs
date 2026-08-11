@@ -57,134 +57,58 @@ export class RepcoAdapter {
    * ...open the store finder, search "0626", select North Shore, and
    * copy the resulting selectors in here.
    */
-  private async ensureStoreSelected(page: Page): Promise<void> {
+async scrapeProduct(url: string): Promise<RepcoProduct> {
+  let page: Page | null = null;
+
+  try {
+    await browserService.initialize();
+    page = await browserService.createPage();
+
+    logger.info(
+      `Scraping Repco product: ${url} using store ${this.storeName} (${this.postalCode})`
+    );
+
+    /*
+     * Navigate directly to the product page.
+     *
+     * Store selection is performed from the product page itself,
+     * avoiding the additional homepage navigation.
+     */
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+
+    /*
+     * Select the store directly on the product page.
+     */
+    await this.ensureStoreSelected(page);
+
+    /*
+     * Repco is heavily client-rendered.
+     */
     try {
-      // If a store is already selected for this session (e.g. cookie
-      // reused from a previous run), skip re-selecting it.
-      const existingStoreName = await page
-        .locator('.product-eligibility .store-name, .tab-store-change .store-name')
-        .first()
-        .textContent({ timeout: 3000 })
-        .catch(() => null);
-
-      if (
-        existingStoreName &&
-        existingStoreName.trim().toLowerCase() === this.storeName.toLowerCase()
-      ) {
-        logger.debug(`Repco store already set to ${this.storeName}; skipping store selection`);
-        return;
-      }
-
-      logger.info(`Repco store not set (or set to something else) — selecting ${this.storeName}`);
-
-      // Open the store finder / "Set my store" widget.
-      const openStoreFinder = page
-        .locator(
-          '.js-store-finder-button, .js-repco-store-finder, a:has-text("Set my store"), a:has-text("Tap here to set your store")'
-        )
-        .first();
-
-      await openStoreFinder.click({ timeout: 8000 });
-
-      // Type the postcode into the store locator search field.
-      const searchInput = page
-        .locator(
-          'input[placeholder*="postcode" i], input[placeholder*="suburb" i], input[name*="postcode" i]'
-        )
-        .first();
-
-      await searchInput.waitFor({ timeout: 8000 });
-      await searchInput.fill(this.postalCode);
-      await page.keyboard.press('Enter');
-
-      // Wait for the store results list to contain our target store,
-      // then click its "Select Store" / "Set As My Store" button.
-      const storeRow = page
-        .locator(`text=${this.storeName}`)
-        .first();
-
-      await storeRow.waitFor({ timeout: 10000 });
-
-      const selectButton = page
-        .locator('a, button')
-        .filter({ hasText: /select store|set as my store/i })
-        .first();
-
-      await selectButton.click({ timeout: 8000 });
-
-      // Give the page a moment to apply the store cookie/session and
-      // re-render (this may trigger an internal navigation/reload).
-      await page.waitForTimeout(2000);
-
-      logger.info(`Repco store selection completed for ${this.storeName}`);
-    } catch (error) {
-      logger.warn(
-        `Repco store selection step failed — availability/store data may be incomplete for this scrape: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+      await page.waitForLoadState('networkidle', {
+        timeout: 15000,
+      });
+    } catch {
+      logger.debug(
+        `Repco networkidle timeout for ${url}; continuing with rendered page`
       );
     }
-  }
 
-  async scrapeProduct(url: string): Promise<RepcoProduct> {
-    let page: Page | null = null;
+    await page.waitForTimeout(2500);
 
     try {
-      await browserService.initialize();
-      page = await browserService.createPage();
-
-      logger.info(
-        `Scraping Repco product: ${url} using store ${this.storeName} (${this.postalCode})`
-      );
-
-      /*
-       * Land on the homepage first so the store-locator widget is
-       * available in a predictable place, select the store there,
-       * and only then navigate to the actual product page — that way
-       * the product page's initial server render already reflects
-       * the selected store's stock/availability.
-       */
-      await page.goto('https://www.repco.co.nz/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000,
+      await page.waitForSelector('h1', {
+        timeout: 10000,
+        state: 'attached',
       });
+    } catch {
+      logger.debug(`Repco h1 not found quickly for ${url}`);
+    }
 
-      await this.ensureStoreSelected(page);
-
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000,
-      });
-
-      /*
-       * Repco is heavily client-rendered.
-       *
-       * Wait for the important product elements first, but do not fail
-       * the scrape if a particular selector is not present.
-       */
-      try {
-        await page.waitForLoadState('networkidle', {
-          timeout: 15000,
-        });
-      } catch {
-        logger.debug(
-          `Repco networkidle timeout for ${url}; continuing with rendered page`
-        );
-      }
-
-      await page.waitForTimeout(2500);
-
-      /*
-       * Give the browser a chance to finish rendering price / availability.
-       */
-      try {
-        await page.waitForSelector('h1', {
-          timeout: 10000,
-          state: 'attached',
-        });
-      } catch {
-        logger.debug(`Repco h1 not found quickly for ${url}`);
-      }
+    // ... your existing extraction code ...
 
       /*
        * ---------------------------------------------------------
