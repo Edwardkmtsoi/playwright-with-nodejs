@@ -25,6 +25,159 @@ export class RepcoAdapter {
   private readonly storeName = 'North Shore';
   private readonly postalCode = '0626';
 
+
+  /**
+   * Select the Repco store directly from the product page.
+   *
+   * This avoids the extra navigation to the Repco homepage.
+   * The product page itself exposes the store-finder UI.
+   */
+  private async ensureStoreSelected(page: Page): Promise<void> {
+    try {
+      // If the product page already has the requested store selected,
+      // there is nothing else to do.
+      const existingStoreName = await page
+        .locator(
+          '.product-eligibility .store-name, .tab-store-change .store-name'
+        )
+        .first()
+        .textContent({ timeout: 3000 })
+        .catch(() => null);
+
+      if (
+        existingStoreName &&
+        existingStoreName.trim().toLowerCase() ===
+          this.storeName.toLowerCase()
+      ) {
+        logger.debug(
+          `Repco store already set to ${this.storeName}; skipping store selection`
+        );
+        return;
+      }
+
+      logger.info(
+        `Repco store not set — selecting ${this.storeName} directly on product page`
+      );
+
+      // Open the store finder on the current product page.
+      const openStoreFinder = page
+        .locator(
+          [
+            '.js-store-finder-button',
+            '.js-repco-store-finder',
+            'a:has-text("Set my store")',
+            'button:has-text("Set my store")',
+            'a:has-text("Tap here to set your store")',
+            'button:has-text("Tap here to set your store")',
+          ].join(', ')
+        )
+        .first();
+
+      await openStoreFinder.click({
+        timeout: 10000,
+      });
+
+      // Find the postcode/suburb input.
+      const searchInput = page
+        .locator(
+          [
+            'input[placeholder*="postcode" i]',
+            'input[placeholder*="suburb" i]',
+            'input[name*="postcode" i]',
+          ].join(', ')
+        )
+        .first();
+
+      await searchInput.waitFor({
+        timeout: 10000,
+        state: 'visible',
+      });
+
+      await searchInput.fill(this.postalCode);
+      await searchInput.press('Enter');
+
+      // Wait for the target store to appear.
+      const storeResult = page
+        .locator(
+          [
+            `.store-name:has-text("${this.storeName}")`,
+            `.store-list-item:has-text("${this.storeName}")`,
+            `.store-result:has-text("${this.storeName}")`,
+            `text=${this.storeName}`,
+          ].join(', ')
+        )
+        .first();
+
+      await storeResult.waitFor({
+        timeout: 15000,
+        state: 'visible',
+      });
+
+      // Prefer the select button within the target store result.
+      let selectButton = storeResult
+        .locator('a, button')
+        .filter({
+          hasText: /select store|set as my store/i,
+        })
+        .first();
+
+      if (!(await selectButton.count().catch(() => 0))) {
+        selectButton = page
+          .locator('a, button')
+          .filter({
+            hasText: /select store|set as my store/i,
+          })
+          .first();
+      }
+
+      await selectButton.click({
+        timeout: 10000,
+      });
+
+      // Repco may update the product page by navigation or AJAX.
+      try {
+        await page.waitForLoadState('domcontentloaded', {
+          timeout: 10000,
+        });
+      } catch {
+        // AJAX update is also valid.
+      }
+
+      // Give the product eligibility section a moment to update.
+      await page.waitForTimeout(1500);
+
+      try {
+        await page
+          .locator(
+            `.product-eligibility .store-name:has-text("${this.storeName}"), ` +
+              `.tab-store-change .store-name:has-text("${this.storeName}")`
+          )
+          .first()
+          .waitFor({
+            timeout: 10000,
+            state: 'visible',
+          });
+
+        logger.info(
+          `Repco store selection completed: ${this.storeName}`
+        );
+      } catch {
+        // The click may have succeeded even if the exact confirmation
+        // element has not appeared yet.
+        logger.info(
+          `Repco store selection clicked for ${this.storeName}; ` +
+            `store confirmation element was not detected`
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        `Repco store selection failed — availability/store data may be incomplete: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   /*
    * -----------------------------------------------------------------
    * STORE SELECTION
@@ -881,12 +1034,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
  * MEMBER PRICE (Improved)
  * ---------------------------------------------------------
  */
-/*
- * ---------------------------------------------------------
- * MEMBER PRICE (Improved & Fixed)
- * ---------------------------------------------------------
- */
-
 let memberPrice: number | null = null;
 
 if (productRoot) {
