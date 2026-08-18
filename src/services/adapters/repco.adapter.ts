@@ -1,6 +1,8 @@
 import { Page } from 'playwright';
 import logger from '../../config/logger';
 import { browserService } from '../browser.service';
+import { ProductScraperAdapter } from './scraper-adapter.interface';
+import { RepcoScrapedProduct } from '../../types/product-scrape.types';
 
 export interface RepcoProduct {
   site: 'repco';
@@ -21,7 +23,11 @@ export interface RepcoProduct {
   scrapedAt: string;
 }
 
-export class RepcoAdapter {
+export class RepcoAdapter implements ProductScraperAdapter {
+    canHandle(url: string): boolean {
+    return url.toLowerCase().includes('repco.co.nz');
+  }
+  readonly site = 'repco' as const;
   private readonly storeName = 'North Shore';
   private readonly postalCode = '0626';
 
