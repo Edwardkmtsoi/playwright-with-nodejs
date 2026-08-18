@@ -12,6 +12,7 @@ import scrapeRoutes from './routes/scrape.routes';
 import testRoutes from './routes/test.routes';
 import { getHealth } from './controllers/health.controller';
 import repcoRoutes from './routes/repco.routes';
+import productScrapeRoutes from './routes/product-scrape.routes';
 
 export const createApp = () => {
   const app = express();
@@ -60,6 +61,7 @@ export const createApp = () => {
   app.use('/api/scrape', scrapeRoutes);
   app.use('/api/tests/smoke', testRoutes);
   app.use('/api/scrape/repco', repcoRoutes);
+  app.use('/api/scrape', productScrapeRoutes);
 
   // 404 handler
   app.use(notFoundMiddleware);
