@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/async-handler';
 import { BadRequestError } from '../utils/http-error';
-import { repcoAdapter } from '../services/adapters/repco.adapter';
+import { getProductScraperAdapter } from '../services/adapters/scraper-adapter.factory';
 
 export const postRepcoProduct = asyncHandler(
   async (req: Request, res: Response) => {
@@ -11,7 +11,9 @@ export const postRepcoProduct = asyncHandler(
       throw new BadRequestError('URL is required');
     }
 
-    if (!url.includes('repco.co.nz')) {
+    const adapter = getProductScraperAdapter('repco');
+
+    if (!adapter.canHandle(url)) {
       throw new BadRequestError(
         'URL must be a Repco New Zealand product URL'
       );
@@ -19,7 +21,7 @@ export const postRepcoProduct = asyncHandler(
 
     const startTime = Date.now();
 
-    const product = await repcoAdapter.scrapeProduct(url);
+    const product = await adapter.scrapeProduct(url);
 
     return res.json({
       success: true,
