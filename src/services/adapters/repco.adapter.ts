@@ -242,7 +242,7 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
      */
     try {
       await page.waitForLoadState('networkidle', {
-        timeout: 15000,
+        timeout: 5000,
       });
     } catch {
       logger.debug(
