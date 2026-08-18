@@ -4,44 +4,24 @@ import { browserService } from '../browser.service';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
 import { RepcoScrapedProduct } from '../../types/product-scrape.types';
 
-export interface RepcoProduct {
-  site: 'repco';
-  url: string;
-  name: string | null;
-  sku: string | null;
-  price: number | null;
-  originalPrice: number | null;
-  memberPrice: number | null;
-  currency: 'NZD';
-  availability:
-    | 'in_stock'
-    | 'out_of_stock'
-    | 'check_availability'
-    | null;
-  store: string;
-  postalCode: string;
-  scrapedAt: string;
-}
-
 export class RepcoAdapter implements ProductScraperAdapter {
-    canHandle(url: string): boolean {
-    return url.toLowerCase().includes('repco.co.nz');
-  }
   readonly site = 'repco' as const;
+
   private readonly storeName = 'North Shore';
   private readonly postalCode = '0626';
 
+  canHandle(url: string): boolean {
+    try {
+      const parsedUrl = new URL(url);
 
-  /**
-   * Select the Repco store directly from the product page.
-   *
-   * This avoids the extra navigation to the Repco homepage.
-   * The product page itself exposes the store-finder UI.
-   */
+      return parsedUrl.hostname.toLowerCase().endsWith('repco.co.nz');
+    } catch {
+      return false;
+    }
+  }
+
   private async ensureStoreSelected(page: Page): Promise<void> {
     try {
-      // If the product page already has the requested store selected,
-      // there is nothing else to do.
       const existingStoreName = await page
         .locator(
           '.product-eligibility .store-name, .tab-store-change .store-name'
@@ -62,10 +42,9 @@ export class RepcoAdapter implements ProductScraperAdapter {
       }
 
       logger.info(
-        `Repco store not set — selecting ${this.storeName} directly on product page`
+        `Repco store not set, selecting ${this.storeName} directly on product page`
       );
 
-      // Open the store finder on the current product page.
       const openStoreFinder = page
         .locator(
           [
@@ -83,7 +62,6 @@ export class RepcoAdapter implements ProductScraperAdapter {
         timeout: 10000,
       });
 
-      // Find the postcode/suburb input.
       const searchInput = page
         .locator(
           [
@@ -102,7 +80,6 @@ export class RepcoAdapter implements ProductScraperAdapter {
       await searchInput.fill(this.postalCode);
       await searchInput.press('Enter');
 
-      // Wait for the target store to appear.
       const storeResult = page
         .locator(
           [
@@ -119,7 +96,6 @@ export class RepcoAdapter implements ProductScraperAdapter {
         state: 'visible',
       });
 
-      // Prefer the select button within the target store result.
       let selectButton = storeResult
         .locator('a, button')
         .filter({
@@ -140,7 +116,6 @@ export class RepcoAdapter implements ProductScraperAdapter {
         timeout: 10000,
       });
 
-      // Repco may update the product page by navigation or AJAX.
       try {
         await page.waitForLoadState('domcontentloaded', {
           timeout: 10000,
@@ -149,7 +124,6 @@ export class RepcoAdapter implements ProductScraperAdapter {
         // AJAX update is also valid.
       }
 
-      // Give the product eligibility section a moment to update.
       await page.waitForTimeout(1500);
 
       try {
@@ -164,12 +138,8 @@ export class RepcoAdapter implements ProductScraperAdapter {
             state: 'visible',
           });
 
-        logger.info(
-          `Repco store selection completed: ${this.storeName}`
-        );
+        logger.info(`Repco store selection completed: ${this.storeName}`);
       } catch {
-        // The click may have succeeded even if the exact confirmation
-        // element has not appeared yet.
         logger.info(
           `Repco store selection clicked for ${this.storeName}; ` +
             `store confirmation element was not detected`
@@ -177,103 +147,52 @@ export class RepcoAdapter implements ProductScraperAdapter {
       }
     } catch (error) {
       logger.warn(
-        `Repco store selection failed — availability/store data may be incomplete: ${
+        `Repco store selection failed. Availability/store data may be incomplete: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
     }
   }
 
-  /*
-   * -----------------------------------------------------------------
-   * STORE SELECTION
-   * -----------------------------------------------------------------
-   *
-   * Repco's storefront (SAP Hybris) does NOT show real stock/store
-   * data to a session that hasn't selected a store yet. A brand new
-   * Playwright browser context has no cookies, so the product page
-   * renders a "Store Locator" prompt instead of the
-   * `.product-eligibility` block this adapter depends on for
-   * availability and store name.
-   *
-   * The site exposes a `/store-finder/setstore` action wired to
-   * "Select Store" / "Set As My Store" buttons inside the store
-   * locator widget. Rather than reverse-engineering the exact
-   * request payload for that endpoint (which is undocumented and can
-   * change), this drives the real UI flow once per browser session:
-   * open the store finder, search the target postcode, and click the
-   * matching store's select button. This is slower but far more
-   * resilient to markup/JS changes than replaying a raw fetch/XHR.
-   *
-   * IMPORTANT: the selectors below are a best-effort based on the
-   * static markup Repco serves (verified via HTML fetch on
-   * 2026-08-10). If Repco changes their store-locator markup this
-   * step may start failing silently (it's wrapped in try/catch and
-   * just logs a warning). If that happens, re-record the flow with:
-   *
-   *   npx playwright codegen https://www.repco.co.nz
-   *
-   * ...open the store finder, search "0626", select North Shore, and
-   * copy the resulting selectors in here.
-   */
-async scrapeProduct(url: string): Promise<RepcoProduct> {
-  let page: Page | null = null;
+  async scrapeProduct(url: string): Promise<RepcoScrapedProduct> {
+    let page: Page | null = null;
 
-  try {
-    await browserService.initialize();
-    page = await browserService.createPage();
-
-    logger.info(
-      `Scraping Repco product: ${url} using store ${this.storeName} (${this.postalCode})`
-    );
-
-    /*
-     * Navigate directly to the product page.
-     *
-     * Store selection is performed from the product page itself,
-     * avoiding the additional homepage navigation.
-     */
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    });
-
-    /*
-     * Select the store directly on the product page.
-     */
-    await this.ensureStoreSelected(page);
-
-    /*
-     * Repco is heavily client-rendered.
-     */
     try {
-      await page.waitForLoadState('networkidle', {
-        timeout: 5000,
-      });
-    } catch {
-      logger.debug(
-        `Repco networkidle timeout for ${url}; continuing with rendered page`
+      await browserService.initialize();
+      page = await browserService.createPage();
+
+      logger.info(
+        `Scraping Repco product: ${url} using store ${this.storeName} (${this.postalCode})`
       );
-    }
 
-    await page.waitForTimeout(2500);
-
-    try {
-      await page.waitForSelector('h1', {
-        timeout: 10000,
-        state: 'attached',
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000,
       });
-    } catch {
-      logger.debug(`Repco h1 not found quickly for ${url}`);
-    }
 
-    // ... your existing extraction code ...
+      await this.ensureStoreSelected(page);
 
-      /*
-       * ---------------------------------------------------------
-       * EXTRACT PRODUCT
-       * ---------------------------------------------------------
-       */
+      try {
+        await page.waitForLoadState('networkidle', {
+          timeout: 5000,
+        });
+      } catch {
+        logger.debug(
+          `Repco networkidle timeout for ${url}; continuing with rendered page`
+        );
+      }
+
+      await page.waitForTimeout(2500);
+
+      try {
+        await page.waitForSelector('h1', {
+          timeout: 10000,
+          state: 'attached',
+        });
+      } catch {
+        logger.debug(`Repco h1 not found quickly for ${url}`);
+      }
+
       const product = await page.evaluate(() => {
         type ExtractedProduct = {
           name: string | null;
@@ -294,12 +213,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           };
         };
 
-        /*
-         * ---------------------------------------------------------
-         * HELPERS
-         * ---------------------------------------------------------
-         */
-
         const cleanText = (
           value: string | null | undefined
         ): string | null => {
@@ -318,16 +231,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
         ): number | null => {
           if (!value) return null;
 
-          /*
-           * Handles:
-           *
-           * $295
-           * $295.00
-           * $1,295
-           * NZ$295
-           * NZD $295
-           * 295.00
-           */
           const text = value
             .replace(/\u00a0/g, ' ')
             .replace(/,/g, '')
@@ -342,12 +245,7 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             return Number.isFinite(parsed) ? parsed : null;
           }
 
-          /*
-           * Fallback for plain numeric values.
-           */
-          const numericMatch = text.match(
-            /\b(\d+(?:\.\d{1,2})?)\b/
-          );
+          const numericMatch = text.match(/\b(\d+(?:\.\d{1,2})?)\b/);
 
           if (numericMatch) {
             const parsed = Number(numericMatch[1]);
@@ -404,17 +302,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           }
         };
 
-        /*
-         * Find the smallest useful ancestor containing the product
-         * title. This is important because Repco pages contain many
-         * prices belonging to recommendations / related products.
-         *
-         * Confirmed against the live Repco PDP markup: the product
-         * title (`.pdp-product-title`) and the price container
-         * (`.price__container`) both live inside `.product-details`,
-         * so walking up from the title a couple of levels reliably
-         * lands on that wrapper.
-         */
         const findProductRoot = (): Element | null => {
           const title =
             document.querySelector('.pdp-product-title') ||
@@ -428,15 +315,10 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             );
           }
 
-          /*
-           * Walk upwards and select an ancestor that contains the
-           * main product information without becoming the entire page.
-           */
           let current: Element | null = title;
 
           for (let i = 0; i < 8 && current; i++) {
-            const textLength =
-              current.textContent?.length || 0;
+            const textLength = current.textContent?.length || 0;
 
             if (
               current.querySelector(
@@ -459,35 +341,15 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
 
         const productRoot = findProductRoot();
 
-        /*
-         * ---------------------------------------------------------
-         * DIAGNOSTICS
-         * ---------------------------------------------------------
-         */
-
         const priceSources: string[] = [];
         const memberPriceSources: string[] = [];
         const originalPriceSources: string[] = [];
-
-        /*
-         * ---------------------------------------------------------
-         * NAME
-         * ---------------------------------------------------------
-         */
 
         const name =
           getText('.pdp-product-title') ||
           getText('[data-testid="product-title"]') ||
           getText('[data-testid*="product-title" i]') ||
           getText('h1');
-
-        /*
-         * ---------------------------------------------------------
-         * SKU
-         * ---------------------------------------------------------
-         *
-         * Live markup example: <h5 class="product-sku">SKU: A6220709</h5>
-         */
 
         let sku: string | null = null;
 
@@ -507,13 +369,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
 
           if (!text) continue;
 
-          /*
-           * Examples:
-           * SKU: ABC123
-           * SKU ABC123
-           * Product Code: ABC123
-           * Part Number: ABC123
-           */
           const match = text.match(
             /(?:SKU|Product\s*(?:Code|Number)|Part\s*Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._-]*)/i
           );
@@ -523,10 +378,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             break;
           }
 
-          /*
-           * If the element itself is clearly a SKU element and
-           * contains only a code, use the value directly.
-           */
           if (
             /sku/i.test(selector) &&
             /^[A-Z0-9][A-Z0-9._-]{2,}$/i.test(text)
@@ -536,9 +387,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           }
         }
 
-        /*
-         * Search product-root text as a final SKU fallback.
-         */
         if (!sku && productRoot) {
           const rootText = cleanText(productRoot.textContent) || '';
 
@@ -551,32 +399,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           }
         }
 
-        /*
-         * ---------------------------------------------------------
-         * STRUCTURED DATA
-         * ---------------------------------------------------------
-         *
-         * Repco exposes a dedicated Product JSON-LD block (separate
-         * from the BreadcrumbList and VideoObject blocks also present
-         * on the page), e.g.:
-         *
-         * {
-         *   "@type": "Product",
-         *   "sku": "A6220709",
-         *   "gtin13": "4054278885766",
-         *   "offers": {
-         *     "@type": "Offer",
-         *     "availability": "https://schema.org/inStock",
-         *     "price": "295",
-         *     "priceCurrency": "NZD"
-         *   }
-         * }
-         *
-         * This is one of the safest fallback sources because it is
-         * explicitly associated with the product rather than a
-         * recommendation tile.
-         */
-
         let structuredPrice: number | null = null;
         let structuredSku: string | null = null;
         let structuredAvailability:
@@ -586,14 +408,10 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           | null = null;
 
         const jsonLdScripts = Array.from(
-          document.querySelectorAll(
-            'script[type="application/ld+json"]'
-          )
+          document.querySelectorAll('script[type="application/ld+json"]')
         );
 
-        const findProductObjects = (
-          value: unknown
-        ): any[] => {
+        const findProductObjects = (value: unknown): any[] => {
           const results: any[] = [];
 
           const visit = (item: any): void => {
@@ -652,17 +470,14 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
                   structuredPrice === null &&
                   offer?.price !== undefined
                 ) {
-                  const parsedPrice = parsePrice(
-                    String(offer.price)
-                  );
+                  const parsedPrice = parsePrice(String(offer.price));
 
                   if (parsedPrice !== null) {
                     structuredPrice = parsedPrice;
                   }
                 }
 
-                const availabilityText =
-                  String(offer?.availability || '');
+                const availabilityText = String(offer?.availability || '');
 
                 if (
                   structuredAvailability === null &&
@@ -678,33 +493,13 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
               }
             }
           } catch {
-            /*
-             * Ignore malformed/non-JSON script blocks.
-             */
+            // Ignore malformed JSON-LD.
           }
         }
-
-        /*
-         * ---------------------------------------------------------
-         * PRICE
-         * ---------------------------------------------------------
-         */
 
         let price: number | null = null;
         let originalPrice: number | null = null;
 
-        /*
-         * 1. Explicit Repco price container.
-         *
-         * Live markup:
-         * <div class="price__container">
-         *   <div class="price">
-         *     <span class="price__dollars has-promo">$295</span>
-         *     <span class="savings">$362</span>
-         *     <span class="price__each">each</span>
-         *   </div>
-         * </div>
-         */
         if (productRoot) {
           const priceContainers = Array.from(
             productRoot.querySelectorAll(
@@ -713,16 +508,10 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           );
 
           for (const container of priceContainers) {
-            const containerText =
-              cleanText(container.textContent) || '';
+            const containerText = cleanText(container.textContent) || '';
 
             if (!containerText) continue;
 
-            /*
-             * Current / selling price.
-             *
-             * Prefer explicit current-price classes first.
-             */
             const currentSelectors = [
               '.price__dollars.has-promo',
               '.price__dollars',
@@ -736,21 +525,14 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             ];
 
             for (const selector of currentSelectors) {
-              const elements = Array.from(
-                container.querySelectorAll(selector)
-              );
+              const elements = Array.from(container.querySelectorAll(selector));
 
               for (const element of elements) {
-                const candidate = parsePrice(
-                  element.textContent
-                );
+                const candidate = parsePrice(element.textContent);
 
                 if (candidate !== null) {
                   price = candidate;
-                  addDiagnostic(
-                    priceSources,
-                    `DOM:${selector}`
-                  );
+                  addDiagnostic(priceSources, `DOM:${selector}`);
                   break;
                 }
               }
@@ -758,10 +540,6 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
               if (price !== null) break;
             }
 
-            /*
-             * If no explicit current price was found, inspect all
-             * price-like elements inside this product price area.
-             */
             if (price === null) {
               const candidates = Array.from(
                 container.querySelectorAll(
@@ -778,34 +556,16 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
 
                 if (candidate === null) continue;
 
-                /*
-                 * Avoid taking obvious old/saving/member prices.
-                 */
-                if (
-                  /saving|save|was|rrp|original|member/i.test(
-                    text
-                  )
-                ) {
+                if (/saving|save|was|rrp|original|member/i.test(text)) {
                   continue;
                 }
 
                 price = candidate;
-                addDiagnostic(
-                  priceSources,
-                  'DOM:price-container-fallback'
-                );
+                addDiagnostic(priceSources, 'DOM:price-container-fallback');
                 break;
               }
             }
 
-            /*
-             * Original / previous price.
-             *
-             * NOTE: on Repco's live markup, the "was" price is
-             * rendered as `.savings` (e.g. "$362") sitting alongside
-             * the discounted `.price__dollars` value. It is NOT a
-             * savings *amount* despite the class name.
-             */
             const originalSelectors = [
               '.savings',
               '.was-price',
@@ -818,26 +578,14 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             ];
 
             for (const selector of originalSelectors) {
-              const elements = Array.from(
-                container.querySelectorAll(selector)
-              );
+              const elements = Array.from(container.querySelectorAll(selector));
 
               for (const element of elements) {
-                const candidate = parsePrice(
-                  element.textContent
-                );
+                const candidate = parsePrice(element.textContent);
 
-                if (
-                  candidate !== null &&
-                  candidate !== price
-                ) {
+                if (candidate !== null && candidate !== price) {
                   originalPrice = candidate;
-
-                  addDiagnostic(
-                    originalPriceSources,
-                    `DOM:${selector}`
-                  );
-
+                  addDiagnostic(originalPriceSources, `DOM:${selector}`);
                   break;
                 }
               }
@@ -849,54 +597,28 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           }
         }
 
-        /*
-         * 2. Product-root price elements.
-         */
         if (price === null && productRoot) {
           const priceElements = Array.from(
-            productRoot.querySelectorAll(
-              '[class*="price" i]'
-            )
+            productRoot.querySelectorAll('[class*="price" i]')
           );
 
           for (const element of priceElements) {
             const text = cleanText(element.textContent);
 
             if (!text) continue;
-
-            /*
-             * Do not accept huge containers containing dozens of
-             * unrelated prices.
-             */
             if (text.length > 300) continue;
-
-            if (
-              /member|saving|save|was|rrp|original/i.test(text)
-            ) {
-              continue;
-            }
+            if (/member|saving|save|was|rrp|original/i.test(text)) continue;
 
             const candidate = parsePrice(text);
 
             if (candidate !== null) {
               price = candidate;
-
-              addDiagnostic(
-                priceSources,
-                'DOM:product-root-price'
-              );
-
+              addDiagnostic(priceSources, 'DOM:product-root-price');
               break;
             }
           }
         }
 
-        /*
-         * 3. Meta price.
-         *
-         * Repco also emits og:price:amount, which is a reliable
-         * fallback when the DOM structure changes.
-         */
         if (price === null) {
           const metaPriceSelectors = [
             'meta[property="og:price:amount"]',
@@ -907,52 +629,24 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
 
           for (const selector of metaPriceSelectors) {
             const value = getAttribute(selector, 'content');
-
             const candidate = parsePrice(value);
 
             if (candidate !== null) {
               price = candidate;
-
-              addDiagnostic(
-                priceSources,
-                `META:${selector}`
-              );
-
+              addDiagnostic(priceSources, `META:${selector}`);
               break;
             }
           }
         }
 
-        /*
-         * 4. JSON-LD.
-         */
         if (price === null && structuredPrice !== null) {
           price = structuredPrice;
-
-          addDiagnostic(
-            priceSources,
-            'JSON-LD:offers.price'
-          );
+          addDiagnostic(priceSources, 'JSON-LD:offers.price');
         }
 
-        /*
-         * ---------------------------------------------------------
-         * ORIGINAL PRICE FALLBACK
-         * ---------------------------------------------------------
-         */
-
         if (originalPrice === null && productRoot) {
-          const rootText =
-            cleanText(productRoot.textContent) || '';
+          const rootText = cleanText(productRoot.textContent) || '';
 
-          /*
-           * Look specifically for:
-           *
-           * Was $362
-           * RRP $362
-           * Originally $362
-           * Save ... from $362
-           */
           const originalPatterns = [
             /\bwas\s*(?:NZD|NZ|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i,
             /\brrp\s*(?:NZD|NZ|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i,
@@ -965,28 +659,15 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
             if (match) {
               const candidate = parsePrice(match[1]);
 
-              if (
-                candidate !== null &&
-                candidate !== price
-              ) {
+              if (candidate !== null && candidate !== price) {
                 originalPrice = candidate;
-
-                addDiagnostic(
-                  originalPriceSources,
-                  'TEXT:original-price'
-                );
-
+                addDiagnostic(originalPriceSources, 'TEXT:original-price');
                 break;
               }
             }
           }
         }
 
-        /*
-         * If the Repco price container gives two prices but the
-         * original-price class isn't available, infer the higher
-         * value as the original price.
-         */
         if (
           originalPrice === null &&
           productRoot &&
@@ -999,9 +680,7 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
           );
 
           for (const container of priceContainers) {
-            const prices = parseAllPrices(
-              container.textContent
-            );
+            const prices = parseAllPrices(container.textContent);
 
             const higherPrices = prices.filter(
               (candidate) => candidate > price!
@@ -1009,272 +688,146 @@ async scrapeProduct(url: string): Promise<RepcoProduct> {
 
             if (higherPrices.length > 0) {
               originalPrice = Math.max(...higherPrices);
-
               addDiagnostic(
                 originalPriceSources,
                 'DOM:price-container-higher-price'
               );
-
               break;
             }
           }
         }
 
-        /*
-         * ---------------------------------------------------------
-         * MEMBER PRICE
-         * ---------------------------------------------------------
-         *
-         * IMPORTANT:
-         *
-         * Do NOT search the whole page.
-         *
-         * Repco pages can contain member prices (and "Repco Rewards
-         * Member" branding/nav elements) far outside the product
-         * area, which would otherwise be incorrectly assigned to the
-         * main product. All matching is scoped to productRoot.
-         */
+        let memberPrice: number | null = null;
 
-      /*
- * ---------------------------------------------------------
- * MEMBER PRICE (Improved)
- * ---------------------------------------------------------
- */
-let memberPrice: number | null = null;
+        if (productRoot) {
+          const root = productRoot;
 
-if (productRoot) {
-  const root = productRoot;
-
-  /*
-   * Repco's member-price markup is different from a normal promotion.
-   *
-   * Example from the supplied HTML:
-   *
-   *   <div class="price__container">
-   *     <div class="price">
-   *       <span class="price__dollars">$64</span>
-   *     </div>
-   *     <div class="promotion-price">
-   *       <div class="price">$38</div>
-   *       <div class="promotion-label">Member Price</div>
-   *     </div>
-   *   </div>
-   *
-   * The important detail is that the $38 is NOT inside the main
-   * .price__dollars element. It is inside a sibling .promotion-price
-   * container and is identified by .promotion-label.
-   *
-   * Therefore member-price extraction should be deterministic:
-   *   1. Find a .promotion-price container.
-   *   2. Confirm its label says "Member Price" / member deal.
-   *   3. Extract the .price inside THAT SAME container.
-   *
-   * Do not search all elements containing the word "member". Repco's
-   * page contains Rewards/member navigation and recommendation tiles
-   * outside the main product.
-   */
-
-  /*
-   * 1. Exact Repco promotion-price structure.
-   *
-   * This is the primary source and should handle the supplied
-   * Castrol HTML: normal price = $64, member price = $38.
-   */
-  const promotionContainers = Array.from(
-    root.querySelectorAll(
-      '.price__container .promotion-price, .promotion-price'
-    )
-  );
-
-  for (const container of promotionContainers) {
-    const label =
-      cleanText(
-        container.querySelector('.promotion-label')?.textContent
-      ) || '';
-
-    if (
-      !/member\s*price/i.test(label) &&
-      !/member\s*deal/i.test(label) &&
-      !/rewards\s*member/i.test(label)
-    ) {
-      continue;
-    }
-
-    /*
-     * Prefer the dedicated .price element inside the promotion
-     * container. This avoids accidentally taking the normal product
-     * price from the parent .price__container.
-     */
-    const promotionPriceElements = Array.from(
-      container.querySelectorAll('.price')
-    );
-
-    for (const element of promotionPriceElements) {
-      const candidate = parsePrice(element.textContent);
-
-      if (
-        candidate !== null &&
-        (price === null || candidate < price)
-      ) {
-        memberPrice = candidate;
-        addDiagnostic(
-          memberPriceSources,
-          'DOM:.promotion-price.member-price'
-        );
-        break;
-      }
-    }
-
-    if (memberPrice !== null) {
-      break;
-    }
-
-    /*
-     * Fallback for a slightly changed markup where the promotion
-     * container still has the member label but the price is not
-     * wrapped in .price.
-     */
-    const promotionText =
-      cleanText(container.textContent) || '';
-
-    const promotionPrices = parseAllPrices(promotionText).filter(
-      (candidate) => price === null || candidate < price
-    );
-
-    if (promotionPrices.length > 0) {
-      memberPrice = promotionPrices[0];
-      addDiagnostic(
-        memberPriceSources,
-        'DOM:.promotion-price.member-price-fallback'
-      );
-      break;
-    }
-  }
-
-  /*
-   * 2. Attribute-based fallback.
-   *
-   * Keep this deliberately narrow so arbitrary member-related
-   * navigation elements cannot become the product's member price.
-   */
-  if (memberPrice === null) {
-    const attributeSelectors = [
-      '[data-member-price]',
-      '[data-memberprice]',
-      '[data-rewards-price]',
-    ];
-
-    for (const selector of attributeSelectors) {
-      const elements = Array.from(root.querySelectorAll(selector));
-
-      for (const element of elements) {
-        const value =
-          element.getAttribute('data-member-price') ??
-          element.getAttribute('data-memberprice') ??
-          element.getAttribute('data-rewards-price');
-
-        const candidate = parsePrice(value);
-
-        if (
-          candidate !== null &&
-          (price === null || candidate < price)
-        ) {
-          memberPrice = candidate;
-          addDiagnostic(
-            memberPriceSources,
-            `DOM:${selector}`
+          const promotionContainers = Array.from(
+            root.querySelectorAll(
+              '.price__container .promotion-price, .promotion-price'
+            )
           );
-          break;
+
+          for (const container of promotionContainers) {
+            const label =
+              cleanText(
+                container.querySelector('.promotion-label')?.textContent
+              ) || '';
+
+            if (
+              !/member\s*price/i.test(label) &&
+              !/member\s*deal/i.test(label) &&
+              !/rewards\s*member/i.test(label)
+            ) {
+              continue;
+            }
+
+            const promotionPriceElements = Array.from(
+              container.querySelectorAll('.price')
+            );
+
+            for (const element of promotionPriceElements) {
+              const candidate = parsePrice(element.textContent);
+
+              if (
+                candidate !== null &&
+                (price === null || candidate < price)
+              ) {
+                memberPrice = candidate;
+                addDiagnostic(
+                  memberPriceSources,
+                  'DOM:.promotion-price.member-price'
+                );
+                break;
+              }
+            }
+
+            if (memberPrice !== null) break;
+
+            const promotionText = cleanText(container.textContent) || '';
+
+            const promotionPrices = parseAllPrices(promotionText).filter(
+              (candidate) => price === null || candidate < price
+            );
+
+            if (promotionPrices.length > 0) {
+              memberPrice = promotionPrices[0];
+              addDiagnostic(
+                memberPriceSources,
+                'DOM:.promotion-price.member-price-fallback'
+              );
+              break;
+            }
+          }
+
+          if (memberPrice === null) {
+            const attributeSelectors = [
+              '[data-member-price]',
+              '[data-memberprice]',
+              '[data-rewards-price]',
+            ];
+
+            for (const selector of attributeSelectors) {
+              const elements = Array.from(root.querySelectorAll(selector));
+
+              for (const element of elements) {
+                const value =
+                  element.getAttribute('data-member-price') ??
+                  element.getAttribute('data-memberprice') ??
+                  element.getAttribute('data-rewards-price');
+
+                const candidate = parsePrice(value);
+
+                if (
+                  candidate !== null &&
+                  (price === null || candidate < price)
+                ) {
+                  memberPrice = candidate;
+                  addDiagnostic(memberPriceSources, `DOM:${selector}`);
+                  break;
+                }
+              }
+
+              if (memberPrice !== null) break;
+            }
+          }
+
+          if (memberPrice === null) {
+            const memberSelectors = [
+              '.member-price',
+              '.price--member',
+              '[data-testid*="member-price" i]',
+              '[class*="member-price" i]',
+              '[class*="member_price" i]',
+            ];
+
+            for (const selector of memberSelectors) {
+              const elements = Array.from(root.querySelectorAll(selector));
+
+              for (const element of elements) {
+                const text = cleanText(element.textContent) || '';
+
+                if (
+                  !/member\s*price|member\s*deal|rewards\s*member/i.test(text)
+                ) {
+                  continue;
+                }
+
+                const prices = parseAllPrices(text).filter(
+                  (candidate) => price === null || candidate < price
+                );
+
+                if (prices.length > 0) {
+                  memberPrice = prices[0];
+                  addDiagnostic(memberPriceSources, `DOM:${selector}`);
+                  break;
+                }
+              }
+
+              if (memberPrice !== null) break;
+            }
+          }
         }
-      }
-
-      if (memberPrice !== null) {
-        break;
-      }
-    }
-  }
-
-  /*
-   * 3. Conservative generic fallback.
-   *
-   * Some Repco templates may use a member-specific class instead of
-   * .promotion-price. Only accept an element when:
-   *   - its own text identifies it as member pricing, AND
-   *   - it contains exactly the price we need, AND
-   *   - that price is below the normal selling price.
-   *
-   * This is intentionally much narrower than the previous
-   * [class*="member"] search.
-   */
-  if (memberPrice === null) {
-    const memberSelectors = [
-      '.member-price',
-      '.price--member',
-      '[data-testid*="member-price" i]',
-      '[class*="member-price" i]',
-      '[class*="member_price" i]',
-    ];
-
-    for (const selector of memberSelectors) {
-      const elements = Array.from(root.querySelectorAll(selector));
-
-      for (const element of elements) {
-        const text = cleanText(element.textContent) || '';
-
-        if (
-          !/member\s*price|member\s*deal|rewards\s*member/i.test(
-            text
-          )
-        ) {
-          continue;
-        }
-
-        const prices = parseAllPrices(text).filter(
-          (candidate) => price === null || candidate < price
-        );
-
-        if (prices.length > 0) {
-          memberPrice = prices[0];
-          addDiagnostic(
-            memberPriceSources,
-            `DOM:${selector}`
-          );
-          break;
-        }
-      }
-
-      if (memberPrice !== null) {
-        break;
-      }
-    }
-  }
-
-  /*
-   * IMPORTANT:
-   *
-   * Do NOT infer memberPrice from JSON-LD's normal offers.price.
-   * Repco's Product JSON-LD in the supplied member-price HTML says
-   * $64, which is the normal product price, while the actual member
-   * price is $38 in the separate .promotion-price block.
-   *
-   * Treating structuredPrice as a member price can therefore produce
-   * incorrect results.
-   */
-}
-        /*
-         * ---------------------------------------------------------
-         * AVAILABILITY
-         * ---------------------------------------------------------
-         *
-         * Live markup:
-         * <div class="row product-eligibility">
-         *   <div class="row tab-store-change">
-         *     <div class="col-xs-6 store-name">North Shore</div>
-         *     <div class="col-xs-3 text-green stock-status">
-         *       <p class="text-green">In Stock</p>
-         *     </div>
-         *     ...
-         */
 
         let availability:
           | 'in_stock'
@@ -1293,8 +846,7 @@ if (productRoot) {
         let eligibility: Element | null = null;
 
         for (const selector of eligibilitySelectors) {
-          const element =
-            document.querySelector(selector);
+          const element = document.querySelector(selector);
 
           if (element) {
             eligibility = element;
@@ -1303,8 +855,7 @@ if (productRoot) {
         }
 
         if (eligibility) {
-          const stockStatus =
-            cleanText(eligibility.textContent) || '';
+          const stockStatus = cleanText(eligibility.textContent) || '';
 
           if (
             /\bout\s*of\s*stock\b/i.test(stockStatus) ||
@@ -1316,16 +867,11 @@ if (productRoot) {
             /\bavailable\b/i.test(stockStatus)
           ) {
             availability = 'in_stock';
-          } else if (
-            /check\s*availability/i.test(stockStatus)
-          ) {
+          } else if (/check\s*availability/i.test(stockStatus)) {
             availability = 'check_availability';
           }
         }
 
-        /*
-         * Structured-data fallback.
-         */
         if (
           availability === null &&
           structuredAvailability !== null
@@ -1333,34 +879,20 @@ if (productRoot) {
           availability = structuredAvailability;
         }
 
-        /*
-         * Product-root fallback.
-         */
         if (availability === null && productRoot) {
-          const productText =
-            cleanText(productRoot.textContent) || '';
+          const productText = cleanText(productRoot.textContent) || '';
 
           if (
             /\bout\s*of\s*stock\b/i.test(productText) ||
             /\bunavailable\b/i.test(productText)
           ) {
             availability = 'out_of_stock';
-          } else if (
-            /\bin\s*stock\b/i.test(productText)
-          ) {
+          } else if (/\bin\s*stock\b/i.test(productText)) {
             availability = 'in_stock';
-          } else if (
-            /check\s*availability/i.test(productText)
-          ) {
+          } else if (/check\s*availability/i.test(productText)) {
             availability = 'check_availability';
           }
         }
-
-        /*
-         * ---------------------------------------------------------
-         * STORE
-         * ---------------------------------------------------------
-         */
 
         let store: string | null = null;
 
@@ -1380,17 +912,9 @@ if (productRoot) {
           }
         }
 
-        /*
-         * Store fallback from product eligibility text.
-         */
         if (!store && eligibility) {
-          const eligibilityText =
-            cleanText(eligibility.textContent) || '';
+          const eligibilityText = cleanText(eligibility.textContent) || '';
 
-          /*
-           * Look for common store wording without assuming that
-           * North Shore is always returned.
-           */
           const storeMatch = eligibilityText.match(
             /(?:store|pickup|pick\s*up)[\s:|-]+([A-Za-z][A-Za-z0-9 '&.-]{2,50})/i
           );
@@ -1400,16 +924,6 @@ if (productRoot) {
           }
         }
 
-        /*
-         * ---------------------------------------------------------
-         * FINAL NORMALISATION
-         * ---------------------------------------------------------
-         */
-
-        /*
-         * If originalPrice equals the current price, it isn't useful
-         * as an original price.
-         */
         if (
           originalPrice !== null &&
           price !== null &&
@@ -1418,10 +932,6 @@ if (productRoot) {
           originalPrice = null;
         }
 
-        /*
-         * A member price equal to the main price isn't really a
-         * separate member price.
-         */
         if (
           memberPrice !== null &&
           price !== null &&
@@ -1430,10 +940,6 @@ if (productRoot) {
           memberPrice = null;
         }
 
-        /*
-         * If the member price is greater than the normal selling
-         * price, it is probably not a member price.
-         */
         if (
           memberPrice !== null &&
           price !== null &&
@@ -1442,10 +948,6 @@ if (productRoot) {
           memberPrice = null;
         }
 
-        /*
-         * If the original price is lower than the selling price,
-         * discard it as an invalid original price.
-         */
         if (
           originalPrice !== null &&
           price !== null &&
@@ -1470,15 +972,6 @@ if (productRoot) {
         } satisfies ExtractedProduct;
       });
 
-      /*
-       * ---------------------------------------------------------
-       * LOG EXTRACTION RESULT
-       * ---------------------------------------------------------
-       *
-       * This is intentionally useful during the current debugging
-       * phase. Once scraping is stable, the diagnostic detail can be
-       * reduced.
-       */
       logger.info(
         `Repco extraction result for ${url}: ${JSON.stringify({
           name: product.name,
@@ -1489,58 +982,31 @@ if (productRoot) {
           availability: product.availability,
           store: product.store,
           priceSources: product.diagnostics.priceSources,
-          memberPriceSources:
-            product.diagnostics.memberPriceSources,
-          originalPriceSources:
-            product.diagnostics.originalPriceSources,
+          memberPriceSources: product.diagnostics.memberPriceSources,
+          originalPriceSources: product.diagnostics.originalPriceSources,
         })}`
       );
 
-      /*
-       * ---------------------------------------------------------
-       * WARN ABOUT MISSING IMPORTANT DATA
-       * ---------------------------------------------------------
-       */
-
       if (product.price === null) {
-        logger.warn(
-          `Repco price could not be extracted for ${url}`
-        );
+        logger.warn(`Repco price could not be extracted for ${url}`);
       }
 
       if (!product.name) {
-        logger.warn(
-          `Repco product name could not be extracted for ${url}`
-        );
+        logger.warn(`Repco product name could not be extracted for ${url}`);
       }
 
       if (!product.sku) {
-        logger.warn(
-          `Repco SKU could not be extracted for ${url}`
-        );
+        logger.warn(`Repco SKU could not be extracted for ${url}`);
       }
-
-      /*
-       * ---------------------------------------------------------
-       * VERIFY STORE
-       * ---------------------------------------------------------
-       */
 
       if (
         product.store &&
-        product.store.toLowerCase() !==
-          this.storeName.toLowerCase()
+        product.store.toLowerCase() !== this.storeName.toLowerCase()
       ) {
         logger.warn(
           `Repco returned store "${product.store}" instead of "${this.storeName}"`
         );
       }
-
-      /*
-       * ---------------------------------------------------------
-       * RETURN API MODEL
-       * ---------------------------------------------------------
-       */
 
       return {
         site: 'repco',
@@ -1557,10 +1023,7 @@ if (productRoot) {
         scrapedAt: new Date().toISOString(),
       };
     } catch (error) {
-      logger.error(
-        `Repco scraping failed for ${url}:`,
-        error
-      );
+      logger.error(`Repco scraping failed for ${url}:`, error);
 
       throw error;
     } finally {
