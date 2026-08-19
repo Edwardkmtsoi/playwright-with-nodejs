@@ -3,6 +3,21 @@ import { SupportedScrapeSite } from '../../types/product-scrape.types';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
 import { repcoAdapter } from './repco.adapter';
 import { chemistWarehouseAdapter } from './chemistwarehouse.adapter';
+import { supercheapAutoAdapter } from './supercheapauto.adapter';
+
+const siteAliases: Record<string, SupportedScrapeSite> = {
+  repco: 'repco',
+
+  chemistwarehouse: 'chemistwarehouse',
+  'chemist-warehouse': 'chemistwarehouse',
+  chemist: 'chemistwarehouse',
+  cw: 'chemistwarehouse',
+
+  supercheapauto: 'supercheapauto',
+  'supercheap-auto': 'supercheapauto',
+  supercheap: 'supercheapauto',
+  sca: 'supercheapauto',
+};
 
 const adapters: Record<
   SupportedScrapeSite,
@@ -10,22 +25,28 @@ const adapters: Record<
 > = {
   repco: repcoAdapter,
   chemistwarehouse: chemistWarehouseAdapter,
+  supercheapauto: supercheapAutoAdapter,
 };
+
+function normalizeSite(site: string): SupportedScrapeSite | null {
+  const normalized = site.trim().toLowerCase().replace(/\s+/g, '');
+
+  return siteAliases[normalized] || null;
+}
 
 export function getProductScraperAdapter(
   site: string
 ): ProductScraperAdapter {
-  const normalizedSite = site
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '') as SupportedScrapeSite;
+  const normalizedSite = normalizeSite(site);
+
+  if (!normalizedSite) {
+    throw new BadRequestError(`Unsupported scrape site: ${site}`);
+  }
 
   const adapter = adapters[normalizedSite];
 
   if (!adapter) {
-    throw new BadRequestError(
-      `Unsupported scrape site: ${site}`
-    );
+    throw new BadRequestError(`Unsupported scrape site: ${site}`);
   }
 
   return adapter;
