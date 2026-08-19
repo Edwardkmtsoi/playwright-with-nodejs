@@ -1,6 +1,7 @@
 export type SupportedScrapeSite =
   | 'repco'
-  | 'chemistwarehouse';
+  | 'chemistwarehouse'
+  | 'supercheapauto';
 
 export type ProductAvailability =
   | 'in_stock'
