@@ -28,7 +28,8 @@ const router = Router();
  *                 type: string
  *                 enum:
  *                   - repco
- *                   - chemistwarehouse
+ *                   - chemistwarehouse 
+ *                   - supercheapauto 
  *                 example: chemistwarehouse
  *               url:
  *                 type: string
