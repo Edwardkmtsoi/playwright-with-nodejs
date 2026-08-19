@@ -34,6 +34,16 @@ export interface ChemistWarehouseScrapedProduct
   discount: number | null;
 }
 
+export interface SupercheapAutoScrapedProduct
+  extends BaseScrapedProduct {
+  site: 'supercheapauto';
+  saleEndDate: string | null;
+  store: string;
+  postalCode: string;
+  storeAvailability: ProductAvailability;
+}
+
 export type ScrapedProduct =
   | RepcoScrapedProduct
-  | ChemistWarehouseScrapedProduct;
+  | ChemistWarehouseScrapedProduct
+  | SupercheapAutoScrapedProduct;
