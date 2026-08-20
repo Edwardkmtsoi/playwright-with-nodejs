@@ -41,7 +41,6 @@ export interface SupercheapAutoScrapedProduct
   saleEndDate: string | null;
   store: string;
   postalCode: string;
-  storeAvailability: ProductAvailability;
 }
 
 export type ScrapedProduct =
