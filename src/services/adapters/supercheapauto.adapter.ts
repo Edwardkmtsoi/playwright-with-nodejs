@@ -1,4 +1,4 @@
-import { Page } from 'playwright';
+import { Page, Locator } from 'playwright';
 import logger from '../../config/logger';
 import { browserService } from '../browser.service';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
@@ -18,7 +18,6 @@ interface ExtractionDiagnostics {
   saleEndDateSource: string | null;
   storeSource: string | null;
   availabilitySource: string | null;
-  storeAvailabilitySource: string | null;
 }
 
 interface ExtractedProduct {
@@ -28,13 +27,21 @@ interface ExtractedProduct {
   originalPrice: number | null;
   saleEndDate: string | null;
   availability: Availability;
-  storeAvailability: Availability;
   store: string | null;
   canonicalUrl: string;
   diagnostics: ExtractionDiagnostics;
 }
 
-export class SupercheapAutoAdapter implements ProductScraperAdapter {
+interface StoreProductData {
+  available?: string[];
+  unavailable?: string[];
+  specialProduct?: string[];
+  lowStock?: string[];
+}
+
+export class SupercheapAutoAdapter
+  implements ProductScraperAdapter
+{
   readonly site = 'supercheapauto' as const;
 
   private readonly storeName = 'SCA Wairau Park';
@@ -61,10 +68,12 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   }
 
   /**
-   * Determine whether the current page is a search-results page.
+   * Detect Supercheap Auto search-result pages.
    *
-   * This is important because the store selector can accidentally submit
-   * the site's global search form if the wrong input is selected.
+   * This is important because entering the postcode into the wrong
+   * search box previously caused navigation to:
+   *
+   * /search?q=0627
    */
   private isSearchResultsUrl(url: string): boolean {
     try {
@@ -75,13 +84,16 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         parsedUrl.pathname.startsWith('/search/')
       );
     } catch {
-      return url.includes('/search?') || url.includes('/search/');
+      return (
+        url.includes('/search?') ||
+        url.includes('/search/')
+      );
     }
   }
 
   /**
-   * Restore the product page if store selection accidentally navigated
-   * the browser to the global search page.
+   * Restore the product page if store selection accidentally
+   * navigates to the global search page.
    */
   private async restoreProductPage(
     page: Page,
@@ -105,123 +117,11 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   }
 
   /**
-   * Select the configured Supercheap Auto store.
-   *
-   * Store selection is deliberately defensive because the site contains
-   * multiple search inputs and a global product-search input.
+   * Open the Supercheap Auto store selector.
    */
-  private async ensureStoreSelected(
-    page: Page,
-    productUrl: string
+  private async openStoreSelector(
+    page: Page
   ): Promise<void> {
-    try {
-      logger.info(
-        `Selecting Supercheap Auto store ${this.storeName} ` +
-          `(${this.postalCode}), store ID ${this.storeId}`
-      );
-
-      await this.openStoreSelector(page);
-
-      const postcodeInput = await this.findStorePostcodeInput(page);
-
-      const inputDetails = await postcodeInput.evaluate(
-        (element: HTMLInputElement) => ({
-          id: element.id || null,
-          name: element.name || null,
-          type: element.type || null,
-          placeholder: element.placeholder || null,
-          className: element.className || null,
-        })
-      );
-
-      logger.debug(
-        `Supercheap Auto store postcode input: ${JSON.stringify(
-          inputDetails
-        )}`
-      );
-
-      /*
-       * Defensive check against accidentally selecting the global
-       * product-search input.
-       */
-      if (
-        inputDetails.name?.toLowerCase() === 'q' ||
-        /search products|what are you looking for/i.test(
-          inputDetails.placeholder || ''
-        )
-      ) {
-        throw new Error(
-          `The selected postcode input appears to be the global ` +
-            `product-search input: ${JSON.stringify(inputDetails)}`
-        );
-      }
-
-      await postcodeInput.fill(this.postalCode);
-
-      await this.searchForStore(page);
-
-      const storeElement = await this.findConfiguredStore(page);
-
-      const storeDetails = await this.getStoreDetails(storeElement);
-
-      logger.info(
-        `Supercheap Auto ${this.storeName} result found: ` +
-          `${JSON.stringify(storeDetails)}`
-      );
-
-      this.validateStoreDetails(storeDetails);
-
-      await storeElement.scrollIntoViewIfNeeded();
-      await storeElement.click({
-        timeout: 10000,
-      });
-
-      await this.waitForStoreSelection(page);
-
-      await this.confirmStoreSelection(page);
-
-      /*
-       * Product fulfilment normally updates through AJAX.
-       */
-      await page.waitForTimeout(2500);
-
-      await page
-        .waitForLoadState('domcontentloaded', {
-          timeout: 10000,
-        })
-        .catch(() => {
-          // AJAX-only update is valid.
-        });
-
-      /*
-       * If the site accidentally submitted the global search form,
-       * restore the product page.
-       */
-      await this.restoreProductPage(page, productUrl);
-
-      logger.info(
-        `Supercheap Auto store selection completed for ${this.storeName}`
-      );
-    } catch (error) {
-      logger.warn(
-        `Supercheap Auto store selection failed for ${this.storeName}. ` +
-          `Store availability may be incomplete: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-      );
-
-      /*
-       * Store selection failure should not prevent product price/name/SKU
-       * extraction. However, we must never continue on a search-results page.
-       */
-      await this.restoreProductPage(page, productUrl);
-    }
-  }
-
-  /**
-   * Open the product-page store selector.
-   */
-  private async openStoreSelector(page: Page): Promise<void> {
     const changeStoreButton = page
       .locator(
         [
@@ -235,71 +135,77 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       )
       .first();
 
-    const changeStoreVisible = await changeStoreButton
+    const visible = await changeStoreButton
       .isVisible({ timeout: 10000 })
       .catch(() => false);
 
-    if (changeStoreVisible) {
+    if (visible) {
       logger.debug(
-        'Clicking Supercheap Auto product-page Change store control'
+        'Clicking Supercheap Auto Change store control'
       );
 
       await changeStoreButton.click({
         timeout: 10000,
       });
-    } else {
-      logger.debug(
-        'Product-page Change store control was not visible. ' +
-          'Checking fulfilment Change control directly'
-      );
     }
 
     /*
-     * Expected fulfilment control:
-     *
-     * #change-preferred-store-button
+     * Some versions of the page expose a second Change button
+     * inside the fulfilment panel.
      */
-    const changePreferredStoreButton = page.locator(
+    const preferredStoreButton = page.locator(
       '#change-preferred-store-button'
     );
 
-    const changePreferredStoreVisible =
-      await changePreferredStoreButton
+    const preferredVisible =
+      await preferredStoreButton
         .isVisible({ timeout: 10000 })
         .catch(() => false);
 
-    if (changePreferredStoreVisible) {
+    if (preferredVisible) {
       logger.debug(
         'Clicking #change-preferred-store-button'
       );
 
-      await changePreferredStoreButton.click({
+      await preferredStoreButton.click({
         timeout: 10000,
       });
     }
   }
 
   /**
-   * Locate the postcode/suburb input belonging to the store selector.
+   * Find the store postcode/suburb input.
+   *
+   * IMPORTANT:
+   * Do not use input[type="search"] or input[name="q"].
    */
-  private async findStorePostcodeInput(page: Page) {
+  private async findStorePostcodeInput(
+    page: Page
+  ): Promise<Locator> {
     const postcodeInput = page
       .locator(
         [
           '.fulfilment-store-selector input[placeholder*="postcode" i]',
           '.fulfilment-store-selector input[placeholder*="suburb" i]',
+
           '.fulfilment-store-modal input[placeholder*="postcode" i]',
           '.fulfilment-store-modal input[placeholder*="suburb" i]',
+
           '.store-locator-modal input[placeholder*="postcode" i]',
           '.store-locator-modal input[placeholder*="suburb" i]',
+
           '.store-selection-modal input[placeholder*="postcode" i]',
           '.store-selection-modal input[placeholder*="suburb" i]',
+
           '[class*="fulfilment" i] input[placeholder*="postcode" i]',
           '[class*="fulfilment" i] input[placeholder*="suburb" i]',
+
           '[class*="store-locator" i] input[placeholder*="postcode" i]',
           '[class*="store-locator" i] input[placeholder*="suburb" i]',
+
           'input[placeholder*="postcode or suburb" i]:not([name="q"])',
           'input[placeholder*="suburb or postcode" i]:not([name="q"])',
+
           'input[placeholder*="postcode" i]:not([name="q"])',
           'input[name*="postcode" i]:not([name="q"])',
           'input[name*="postal" i]:not([name="q"])',
@@ -314,25 +220,57 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       timeout: 15000,
     });
 
+    const details = await postcodeInput.evaluate(
+      (element: HTMLInputElement) => ({
+        id: element.id || null,
+        name: element.name || null,
+        type: element.type || null,
+        placeholder: element.placeholder || null,
+        className: element.className || null,
+      })
+    );
+
+    logger.debug(
+      `Supercheap Auto store postcode input: ${JSON.stringify(
+        details
+      )}`
+    );
+
+    /*
+     * Never accidentally use the global product-search field.
+     */
+    if (
+      details.name?.toLowerCase() === 'q' ||
+      /search products|what are you looking for/i.test(
+        details.placeholder || ''
+      )
+    ) {
+      throw new Error(
+        `Selected input appears to be the global product-search input: ` +
+          `${JSON.stringify(details)}`
+      );
+    }
+
     return postcodeInput;
   }
 
   /**
-   * Search for stores after entering the postcode.
-   *
-   * We intentionally do NOT press Enter because Enter previously caused
-   * the global product search to navigate to /search?q=0627.
+   * Search for the requested store.
    */
-  private async searchForStore(page: Page): Promise<void> {
-    const storeSearchButton = page
+  private async searchForStore(
+    page: Page
+  ): Promise<void> {
+    const searchButton = page
       .locator(
         [
           '.fulfilment-store-selector button:has-text("Search")',
           '.fulfilment-store-modal button:has-text("Search")',
           '.store-locator-modal button:has-text("Search")',
           '.store-selection-modal button:has-text("Search")',
+
           '[class*="fulfilment" i] button:has-text("Search")',
           '[class*="store-locator" i] button:has-text("Search")',
+
           'button[aria-label*="search store" i]',
           'button:has-text("Find Stores")',
           'button:has-text("Find stores")',
@@ -340,36 +278,65 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       )
       .first();
 
-    const visible = await storeSearchButton
+    const visible = await searchButton
       .isVisible({ timeout: 3000 })
       .catch(() => false);
 
     if (visible) {
       logger.debug(
-        'Clicking the dedicated store-search button'
+        'Clicking Supercheap Auto store search button'
       );
 
-      await storeSearchButton.click({
+      await searchButton.click({
         timeout: 10000,
       });
     } else {
       logger.debug(
-        'No dedicated store-search button found. ' +
-          'Waiting for automatic store-result refresh'
+        'No dedicated store search button found. ' +
+          'Waiting for automatic store-result refresh.'
       );
     }
   }
 
   /**
-   * Locate the exact configured store.
+   * Find Wairau Park.
+   *
+   * Support both the old fulfilment-store-item markup and the
+   * actual markup shown in the supplied HTML:
+   *
+   * .store-item[data-store-id="7030"]
    */
-  private async findConfiguredStore(page: Page) {
+  private async findConfiguredStore(
+    page: Page
+  ): Promise<Locator> {
     const store = page
       .locator(
         [
+          /*
+           * CURRENT Supercheap Auto markup
+           */
+          `.store-item[data-store-id="${this.storeId}"]`,
+
+          /*
+           * Possible alternative/current markup
+           */
+          `.store-item[data-id="${this.storeId}"]`,
+          `.store-item[data-preferred-id="${this.storeId}"]`,
+
+          /*
+           * Older fulfilment markup
+           */
           `.fulfilment-store-item[data-id="${this.storeId}"]`,
           `.fulfilment-store-item[data-preferred-id="${this.storeId}"]`,
+          `.fulfilment-store-item[data-store-id="${this.storeId}"]`,
+
+          /*
+           * Name-based fallback
+           */
+          `.store-item[data-name="${this.storeName}"]`,
           `.fulfilment-store-item[data-name="${this.storeName}"]`,
+
+          `.store-item:has(.store-name:text-is("${this.storeName}"))`,
           `.fulfilment-store-item:has(.store-name:text-is("${this.storeName}"))`,
         ].join(', ')
       )
@@ -384,133 +351,155 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   }
 
   /**
-   * Extract diagnostic information from a store element.
+   * Validate that the store element really belongs to Wairau Park.
    */
-  private async getStoreDetails(storeElement: any) {
-    return storeElement.evaluate((element: HTMLElement) => {
-      const clean = (value: string | null | undefined): string | null => {
-        if (!value) {
-          return null;
-        }
+  private async validateConfiguredStore(
+    store: Locator
+  ): Promise<void> {
+    const details = await store.evaluate(
+      (element: HTMLElement) => ({
+        storeId:
+          element.getAttribute('data-store-id') ||
+          element.getAttribute('data-id'),
 
-        const result = value
-          .replace(/\u00a0/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        return result || null;
-      };
-
-      return {
-        storeName:
-          element.getAttribute('data-name') ||
-          clean(
-            element.querySelector('.store-name')?.textContent
-          ),
-
-        storeAddress: clean(
-          element.querySelector('.store-address')?.textContent
-        ),
-
-        storeDistance: clean(
-          element.querySelector('.store-distance')?.textContent
-        ),
-
-        stockStatus: clean(
-          element.querySelector('.stock-status')?.textContent
-        ),
-
-        dataId: element.getAttribute('data-id'),
-
-        dataPreferredId:
+        preferredId:
           element.getAttribute('data-preferred-id'),
 
-        className: element.className,
-      };
-    });
-  }
+        storeName:
+          element.getAttribute('data-name') ||
+          element.querySelector(
+            '.store-name'
+          )?.textContent?.replace(/\s+/g, ' ').trim() ||
+          element.querySelector(
+            '.my-store-name'
+          )?.textContent?.replace(/\s+/g, ' ').trim() ||
+          null,
 
-  /**
-   * Verify that the result really is the configured store.
-   */
-  private validateStoreDetails(storeDetails: {
-    storeName: string | null;
-    dataId: string | null;
-    dataPreferredId: string | null;
-  }): void {
-    const matchesStore =
-      storeDetails.dataId === this.storeId ||
-      storeDetails.dataPreferredId === this.storeId ||
-      storeDetails.storeName === this.storeName;
+        status:
+          element.getAttribute('data-status'),
 
-    if (!matchesStore) {
+        className:
+          element.className,
+      })
+    );
+
+    logger.info(
+      `Supercheap Auto configured store found: ${JSON.stringify(
+        details
+      )}`
+    );
+
+    const matchesId =
+      details.storeId === this.storeId ||
+      details.preferredId === this.storeId;
+
+    const matchesName =
+      details.storeName
+        ?.toLowerCase()
+        .includes(
+          this.storeName.toLowerCase()
+        );
+
+    if (!matchesId && !matchesName) {
       throw new Error(
-        `Unexpected store result selected: ${JSON.stringify(
-          storeDetails
-        )}`
+        `Unexpected Supercheap Auto store returned: ` +
+          `${JSON.stringify(details)}`
       );
     }
   }
 
   /**
-   * Wait until the selected store is marked as checked.
+   * Wait for the store to be selected.
+   *
+   * The current HTML uses:
+   *
+   * .store-item[data-store-id="7030"]
+   *
+   * and may add classes such as "selected".
+   *
+   * We don't make the "selected" class mandatory because the page
+   * can update the store information through AJAX without changing
+   * the class immediately.
    */
-  private async waitForStoreSelection(page: Page): Promise<void> {
-    const checkedStore = page
-      .locator(
-        [
-          `.fulfilment-store-item.checked[data-id="${this.storeId}"]`,
-          `.fulfilment-store-item.checked[data-preferred-id="${this.storeId}"]`,
-          `.fulfilment-store-item.checked[data-name="${this.storeName}"]`,
-        ].join(', ')
-      )
-      .first();
+  private async waitForStoreSelection(
+    page: Page
+  ): Promise<void> {
+    const store = page.locator(
+      [
+        `.store-item[data-store-id="${this.storeId}"]`,
+        `.store-item[data-id="${this.storeId}"]`,
+        `.fulfilment-store-item[data-id="${this.storeId}"]`,
+        `.fulfilment-store-item[data-preferred-id="${this.storeId}"]`,
+      ].join(', ')
+    ).first();
 
-    await checkedStore.waitFor({
+    await store.waitFor({
       state: 'visible',
       timeout: 10000,
     });
 
     logger.debug(
-      `${this.storeName} is marked as selected in the store result list`
+      `${this.storeName} store element remains visible after selection`
     );
   }
 
   /**
    * Confirm the selected store.
+   *
+   * Support the known fulfilment CTA as well as common alternatives.
    */
-  private async confirmStoreSelection(page: Page): Promise<void> {
+  private async confirmStoreSelection(
+    page: Page
+  ): Promise<void> {
     const confirmButton = page
       .locator(
         [
           `button.fulfilment-cta[data-selected-id="${this.storeId}"]`,
           `button.fulfilment-cta[data-preferred-id="${this.storeId}"]`,
           'button.fulfilment-cta:has-text("Confirm")',
+          'button:has-text("Confirm")',
         ].join(', ')
       )
       .first();
 
-    await confirmButton.waitFor({
-      state: 'visible',
-      timeout: 10000,
-    });
+    const visible = await confirmButton
+      .isVisible({ timeout: 10000 })
+      .catch(() => false);
+
+    /*
+     * Some versions may automatically select the store and not show
+     * a confirmation button.
+     */
+    if (!visible) {
+      logger.debug(
+        'No visible store confirmation button found. ' +
+          'Assuming store selection was automatic.'
+      );
+
+      return;
+    }
 
     const details = await confirmButton.evaluate(
       (element: HTMLElement) => ({
         text:
-          element.textContent?.replace(/\s+/g, ' ').trim() ||
-          null,
+          element.textContent
+            ?.replace(/\s+/g, ' ')
+            .trim() || null,
 
         selectedId:
-          element.getAttribute('data-selected-id'),
+          element.getAttribute(
+            'data-selected-id'
+          ),
 
         preferredId:
-          element.getAttribute('data-preferred-id'),
+          element.getAttribute(
+            'data-preferred-id'
+          ),
       })
     );
 
     logger.debug(
-      `Supercheap Auto confirmation button: ${JSON.stringify(
+      `Supercheap Auto store confirmation button: ${JSON.stringify(
         details
       )}`
     );
@@ -521,7 +510,87 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   }
 
   /**
-   * Validate that we are still on a product page.
+   * Select the configured Supercheap Auto store.
+   */
+  private async ensureStoreSelected(
+    page: Page,
+    productUrl: string
+  ): Promise<void> {
+    try {
+      logger.info(
+        `Selecting Supercheap Auto store ${this.storeName} ` +
+          `(${this.postalCode}), store ID ${this.storeId}`
+      );
+
+      await this.openStoreSelector(page);
+
+      const postcodeInput =
+        await this.findStorePostcodeInput(page);
+
+      await postcodeInput.fill('');
+      await postcodeInput.fill(
+        this.postalCode
+      );
+
+      /*
+       * DO NOT press Enter.
+       */
+      await this.searchForStore(page);
+
+      const store =
+        await this.findConfiguredStore(page);
+
+      await this.validateConfiguredStore(
+        store
+      );
+
+      await store.scrollIntoViewIfNeeded();
+
+      await store.click({
+        timeout: 10000,
+      });
+
+      await this.waitForStoreSelection(
+        page
+      );
+
+      await this.confirmStoreSelection(
+        page
+      );
+
+      /*
+       * Allow the fulfilment information to update.
+       */
+      await page.waitForTimeout(2500);
+
+      await this.restoreProductPage(
+        page,
+        productUrl
+      );
+
+      logger.info(
+        `Supercheap Auto store selection completed for ${this.storeName}`
+      );
+    } catch (error) {
+      logger.warn(
+        `Supercheap Auto store selection failed for ${this.storeName}. ` +
+          `Product extraction will continue, but availability may be unknown: ` +
+          `${
+            error instanceof Error
+              ? error.message
+              : String(error)
+          }`
+      );
+
+      await this.restoreProductPage(
+        page,
+        productUrl
+      );
+    }
+  }
+
+  /**
+   * Verify that the browser is still on a product page.
    */
   private async validateProductPage(
     page: Page,
@@ -529,7 +598,9 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   ): Promise<void> {
     const currentUrl = page.url();
 
-    if (this.isSearchResultsUrl(currentUrl)) {
+    if (
+      this.isSearchResultsUrl(currentUrl)
+    ) {
       throw new Error(
         `Supercheap Auto extraction aborted because the browser ` +
           `is on a search-results page instead of the product page. ` +
@@ -537,7 +608,7 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       );
     }
 
-    const pageHeading = await page
+    const heading = await page
       .locator('h1')
       .first()
       .textContent({
@@ -546,11 +617,15 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       .catch(() => null);
 
     const cleanedHeading =
-      pageHeading?.replace(/\s+/g, ' ').trim() || null;
+      heading
+        ?.replace(/\s+/g, ' ')
+        .trim() || null;
 
     if (
       cleanedHeading &&
-      /product search results/i.test(cleanedHeading)
+      /product search results/i.test(
+        cleanedHeading
+      )
     ) {
       throw new Error(
         `Supercheap Auto extraction aborted because the page ` +
@@ -560,7 +635,11 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
   }
 
   /**
-   * Extract product data from the rendered product page.
+   * Extract product information.
+   *
+   * IMPORTANT:
+   * Availability is determined from the configured store's
+   * store-item element, NOT from generic product-page text.
    */
   private async extractProduct(
     page: Page
@@ -570,15 +649,6 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         expectedStoreName,
         expectedStoreId,
       }): ExtractedProduct => {
-        type Availability =
-          | 'in_stock'
-          | 'out_of_stock'
-          | 'check_availability'
-          | 'unknown';
-
-        /**
-         * Normalize text.
-         */
         const cleanText = (
           value: string | null | undefined
         ): string | null => {
@@ -594,9 +664,6 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           return cleaned || null;
         };
 
-        /**
-         * Parse a price safely.
-         */
         const parsePrice = (
           value: string | null | undefined
         ): number | null => {
@@ -610,14 +677,16 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
             .trim();
 
           /*
-           * Prefer a currency-prefixed price when present.
+           * Currency price.
            */
-          const currencyMatch = text.match(
-            /(?:NZD|NZ|\$)\s*(\d+(?:\.\d{1,2})?)/
-          );
+          const currencyMatch =
+            text.match(
+              /(?:NZD|NZ|\$)\s*(\d+(?:\.\d{1,2})?)/
+            );
 
           if (currencyMatch) {
-            const parsed = Number(currencyMatch[1]);
+            const parsed =
+              Number(currencyMatch[1]);
 
             return Number.isFinite(parsed)
               ? parsed
@@ -625,53 +694,56 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           }
 
           /*
-           * Fallback for plain numeric price attributes.
+           * Plain numeric content, e.g.:
+           *
+           * <meta itemprop="price" content="39.99">
            */
-          const numericMatch = text.match(
-            /^\s*(\d+(?:\.\d{1,2})?)\s*$/
-          );
+          const numericMatch =
+            text.match(
+              /^\s*(\d+(?:\.\d{1,2})?)\s*$/
+            );
 
           if (!numericMatch) {
             return null;
           }
 
-          const parsed = Number(numericMatch[1]);
+          const parsed =
+            Number(numericMatch[1]);
 
           return Number.isFinite(parsed)
             ? parsed
             : null;
         };
 
-        /**
-         * Get text from a selector.
-         */
         const getText = (
           selector: string
         ): string | null => {
           const element =
-            document.querySelector(selector);
+            document.querySelector(
+              selector
+            );
 
-          return cleanText(element?.textContent);
+          return cleanText(
+            element?.textContent
+          );
         };
 
-        /**
-         * Get an attribute from a selector.
-         */
         const getAttribute = (
           selector: string,
           attribute: string
         ): string | null => {
           const element =
-            document.querySelector(selector);
+            document.querySelector(
+              selector
+            );
 
           return cleanText(
-            element?.getAttribute(attribute)
+            element?.getAttribute(
+              attribute
+            )
           );
         };
 
-        /**
-         * Try multiple selectors and return the first successful result.
-         */
         const getFirstText = (
           selectors: string[]
         ): {
@@ -679,7 +751,8 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           selector: string | null;
         } => {
           for (const selector of selectors) {
-            const value = getText(selector);
+            const value =
+              getText(selector);
 
             if (value) {
               return {
@@ -695,48 +768,50 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           };
         };
 
-        const diagnostics: ExtractionDiagnostics = {
-          nameSource: null,
-          skuSource: null,
-          priceSource: null,
-          originalPriceSource: null,
-          saleEndDateSource: null,
-          storeSource: null,
-          availabilitySource: null,
-          storeAvailabilitySource: null,
-        };
+        const diagnostics: ExtractionDiagnostics =
+          {
+            nameSource: null,
+            skuSource: null,
+            priceSource: null,
+            originalPriceSource: null,
+            saleEndDateSource: null,
+            storeSource: null,
+            availabilitySource: null,
+          };
 
         /*
-         * -------------------------------------------------------------
+         * ============================================================
          * PRODUCT NAME
-         * -------------------------------------------------------------
+         * ============================================================
          */
 
         let name: string | null = null;
 
         /*
-         * First try pageContext.title because it is generally more
-         * specific than document.title.
+         * pageContext.title
          */
         const scripts = Array.from(
-          document.querySelectorAll('script')
+          document.querySelectorAll(
+            'script'
+          )
         );
 
         for (const script of scripts) {
-          const text = script.textContent || '';
+          const text =
+            script.textContent || '';
 
-          const pageContextMatch = text.match(
-            /pageContext\s*=\s*({[\s\S]*?});/
-          );
+          const match =
+            text.match(
+              /pageContext\s*=\s*({[\s\S]*?});/
+            );
 
-          if (!pageContextMatch) {
+          if (!match) {
             continue;
           }
 
           try {
-            const parsed = JSON.parse(
-              pageContextMatch[1]
-            );
+            const parsed =
+              JSON.parse(match[1]);
 
             if (parsed?.title) {
               name = cleanText(
@@ -749,7 +824,7 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
               break;
             }
           } catch {
-            // Ignore malformed pageContext objects.
+            // Ignore malformed pageContext.
           }
         }
 
@@ -757,27 +832,30 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
          * DOM fallback.
          */
         if (!name) {
-          const nameResult = getFirstText([
-            'h1[itemprop="name"]',
-            '[itemprop="name"]',
-            'h1.product-name',
-            'h1[class*="product-name" i]',
-            'h1[class*="product-title" i]',
-            'h1',
-          ]);
+          const result =
+            getFirstText([
+              'h1[itemprop="name"]',
+              '[itemprop="name"]',
+              'h1.product-name',
+              'h1[class*="product-name" i]',
+              'h1[class*="product-title" i]',
+              'h1',
+            ]);
 
-          if (nameResult.value) {
-            name = nameResult.value;
+          if (result.value) {
+            name = result.value;
+
             diagnostics.nameSource =
-              `DOM:${nameResult.selector}`;
+              `DOM:${result.selector}`;
           }
         }
 
         /*
-         * Final fallback.
+         * document.title fallback.
          */
         if (!name) {
-          const title = cleanText(document.title);
+          const title =
+            cleanText(document.title);
 
           if (title) {
             name = title
@@ -792,21 +870,20 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           }
         }
 
-        /*
-         * Never return the search-results heading as a product name.
-         */
         if (
           name &&
-          /product search results/i.test(name)
+          /product search results/i.test(
+            name
+          )
         ) {
           name = null;
           diagnostics.nameSource = null;
         }
 
         /*
-         * -------------------------------------------------------------
-         * SKU / ITEM NUMBER
-         * -------------------------------------------------------------
+         * ============================================================
+         * SKU
+         * ============================================================
          */
 
         let sku: string | null = null;
@@ -823,29 +900,34 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
 
         if (productIdMeta) {
           sku = productIdMeta;
+
           diagnostics.skuSource =
             'META:itemprop=productID/sku';
         }
 
         if (!sku) {
-          const masterIdElement =
-            document.querySelector('[data-masterid]');
+          const masterId =
+            document.querySelector(
+              '[data-masterid]'
+            );
 
-          const dataMasterId = cleanText(
-            masterIdElement?.getAttribute(
-              'data-masterid'
-            )
-          );
+          const value =
+            cleanText(
+              masterId?.getAttribute(
+                'data-masterid'
+              )
+            );
 
-          if (dataMasterId) {
-            sku = dataMasterId;
+          if (value) {
+            sku = value;
+
             diagnostics.skuSource =
               'DOM:data-masterid';
           }
         }
 
         if (!sku) {
-          const productNumberResult =
+          const result =
             getFirstText([
               '.product-number',
               '[class*="product-number" i]',
@@ -854,26 +936,23 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
               '[class*="sku" i]',
             ]);
 
-          const productNumberText =
-            productNumberResult.value;
-
-          const productNumberMatch =
-            productNumberText?.match(
+          const match =
+            result.value?.match(
               /(?:Item\s*No\.?|SKU|Product\s*Code)\s*:?\s*([A-Z0-9._-]+)/i
             );
 
-          if (productNumberMatch) {
-            sku = productNumberMatch[1];
+          if (match) {
+            sku = match[1];
 
             diagnostics.skuSource =
-              `TEXT:${productNumberResult.selector}`;
+              `TEXT:${result.selector}`;
           }
         }
 
         /*
-         * -------------------------------------------------------------
+         * ============================================================
          * CURRENT PRICE
-         * -------------------------------------------------------------
+         * ============================================================
          */
 
         let price: number | null = null;
@@ -890,19 +969,24 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
 
         for (const selector of priceSelectors) {
           const element =
-            document.querySelector(selector);
+            document.querySelector(
+              selector
+            );
 
           if (!element) {
             continue;
           }
 
-          const attributePrice =
-            element.getAttribute('content');
+          const content =
+            element.getAttribute(
+              'content'
+            );
 
-          const candidate = parsePrice(
-            attributePrice ||
-              element.textContent
-          );
+          const candidate =
+            parsePrice(
+              content ||
+                element.textContent
+            );
 
           if (candidate !== null) {
             price = candidate;
@@ -915,12 +999,13 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         }
 
         /*
-         * -------------------------------------------------------------
-         * ORIGINAL / WAS PRICE
-         * -------------------------------------------------------------
+         * ============================================================
+         * ORIGINAL PRICE
+         * ============================================================
          */
 
-        let originalPrice: number | null = null;
+        let originalPrice:
+          number | null = null;
 
         const originalPriceSelectors = [
           '.price-standard .stroke-content',
@@ -934,13 +1019,19 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
 
         for (const selector of originalPriceSelectors) {
           const candidate =
-            parsePrice(getText(selector));
+            parsePrice(
+              getText(selector)
+            );
 
           if (
             candidate !== null &&
-            (price === null || candidate > price)
+            (
+              price === null ||
+              candidate > price
+            )
           ) {
-            originalPrice = candidate;
+            originalPrice =
+              candidate;
 
             diagnostics.originalPriceSource =
               `DOM:${selector}`;
@@ -950,27 +1041,36 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         }
 
         /*
-         * Text fallback:
-         *
-         * "Was $XX.XX"
+         * "Was $XX.XX" fallback.
          */
-        if (originalPrice === null) {
+        if (
+          originalPrice === null
+        ) {
           const bodyText =
-            cleanText(document.body?.innerText) || '';
+            cleanText(
+              document.body?.innerText
+            ) || '';
 
-          const wasMatch = bodyText.match(
-            /\bWas\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i
-          );
+          const wasMatch =
+            bodyText.match(
+              /\bWas\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i
+            );
 
           if (wasMatch) {
             const candidate =
-              parsePrice(wasMatch[1]);
+              parsePrice(
+                wasMatch[1]
+              );
 
             if (
               candidate !== null &&
-              (price === null || candidate > price)
+              (
+                price === null ||
+                candidate > price
+              )
             ) {
-              originalPrice = candidate;
+              originalPrice =
+                candidate;
 
               diagnostics.originalPriceSource =
                 'TEXT:Was';
@@ -979,12 +1079,13 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         }
 
         /*
-         * -------------------------------------------------------------
+         * ============================================================
          * SALE END DATE
-         * -------------------------------------------------------------
+         * ============================================================
          */
 
-        let saleEndDate: string | null = null;
+        let saleEndDate:
+          string | null = null;
 
         const saleEndResult =
           getFirstText([
@@ -1001,431 +1102,323 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
               /(\d{1,2}\/\d{1,2}\/\d{2,4})/
             );
 
-          saleEndDate = dateMatch
-            ? dateMatch[1]
-            : saleEndResult.value;
+          saleEndDate =
+            dateMatch
+              ? dateMatch[1]
+              : saleEndResult.value;
 
           diagnostics.saleEndDateSource =
             `DOM:${saleEndResult.selector}`;
         }
 
         /*
-         * -------------------------------------------------------------
-         * GENERAL PRODUCT AVAILABILITY
-         * -------------------------------------------------------------
+         * ============================================================
+         * AVAILABILITY
+         * ============================================================
+         *
+         * THIS IS THE IMPORTANT PART.
+         *
+         * We no longer inspect generic product-page text such as:
+         *
+         * "Out of Stock"
+         *
+         * because that can belong to another store.
+         *
+         * Instead we locate:
+         *
+         * .store-item[data-store-id="7030"]
+         *
+         * and inspect its data-products attribute.
+         *
+         * Example supplied by you:
+         *
+         * data-products='{
+         *   "available":["518963"],
+         *   "unavailable":[],
+         *   "specialProduct":[],
+         *   "lowStock":[]
+         * }'
+         *
+         * ============================================================
          */
 
-        let availability: Availability =
-          'unknown';
+        let availability:
+          Availability = 'unknown';
 
-        const productArea =
-          document.querySelector(
-            '[class*="product-detail" i]'
-          ) ||
-          document.querySelector(
-            '[class*="product-info" i]'
-          ) ||
-          document.querySelector('main');
-
-        const productAreaText =
-          cleanText(productArea?.textContent) || '';
-
-        const addToCartElement =
-          Array.from(
-            document.querySelectorAll('button, a')
-          ).find((element) => {
-            const text =
-              cleanText(element.textContent) || '';
-
-            return /\badd\s+to\s+cart\b/i.test(text);
-          });
+        let store:
+          string | null = null;
 
         /*
-         * Check explicit unavailable states first.
+         * Find the exact configured store.
          */
-        if (
-          /\bcurrently\s+unavailable\b/i.test(
-            productAreaText
-          ) ||
-          /\bout\s+of\s+stock\b/i.test(
-            productAreaText
-          ) ||
-          /\bnot\s+available\b/i.test(
-            productAreaText
-          ) ||
-          /\bnot\s+stocked\b/i.test(
-            productAreaText
-          )
-        ) {
-          availability = 'out_of_stock';
-
-          diagnostics.availabilitySource =
-            'TEXT:product-area-unavailable';
-        } else if (addToCartElement) {
-          availability = 'in_stock';
-
-          diagnostics.availabilitySource =
-            'DOM:Add-to-Cart';
-        } else if (
-          /\bin\s+stock\b/i.test(
-            productAreaText
-          ) ||
-          /\bpick\s+up\s+today\b/i.test(
-            productAreaText
-          )
-        ) {
-          availability = 'in_stock';
-
-          diagnostics.availabilitySource =
-            'TEXT:product-area-in-stock';
-        } else if (
-          /\bcheck\s+availability\b/i.test(
-            productAreaText
-          )
-        ) {
-          availability =
-            'check_availability';
-
-          diagnostics.availabilitySource =
-            'TEXT:check-availability';
-        }
-
-        /*
-         * -------------------------------------------------------------
-         * STORE-SPECIFIC AVAILABILITY
-         * -------------------------------------------------------------
-         */
-
-        let store: string | null = null;
-
-        let storeAvailability: Availability =
-          'unknown';
-
-        const storeItems = Array.from(
-          document.querySelectorAll(
-            '.fulfilment-store-item'
-          )
-        );
-
-        /*
-         * Prefer an explicitly checked Wairau Park store.
-         */
-        const selectedStoreElement =
+        const storeElement =
           document.querySelector(
-            `.fulfilment-store-item.checked[data-id="${expectedStoreId}"]`
+            `.store-item[data-store-id="${expectedStoreId}"]`
           ) ||
           document.querySelector(
-            `.fulfilment-store-item.checked[data-preferred-id="${expectedStoreId}"]`
+            `.store-item[data-id="${expectedStoreId}"]`
           ) ||
-          document.querySelector(
-            `.fulfilment-store-item.checked[data-name="${expectedStoreName}"]`
-          ) ||
-
-          /*
-           * Then allow an explicitly matching store that is
-           * present but not marked checked.
-           */
           document.querySelector(
             `.fulfilment-store-item[data-id="${expectedStoreId}"]`
           ) ||
           document.querySelector(
-            `.fulfilment-store-item[data-preferred-id="${expectedStoreId}"]`
-          ) ||
-          document.querySelector(
-            `.fulfilment-store-item[data-name="${expectedStoreName}"]`
-          ) ||
+            `.fulfilment-store-item[data-store-id="${expectedStoreId}"]`
+          );
 
+        if (storeElement) {
           /*
-           * Finally match by store name.
+           * Store name.
            */
-          storeItems.find((element) => {
-            const itemStoreName =
-              cleanText(
-                element.getAttribute(
-                  'data-name'
-                ) ||
-                  element.querySelector(
-                    '.store-name'
-                  )?.textContent
-              );
-
-            return (
-              itemStoreName?.toLowerCase() ===
-              expectedStoreName.toLowerCase()
-            );
-          }) ||
-          null;
-
-        if (selectedStoreElement) {
-          const selectedStoreName =
+          store =
             cleanText(
-              selectedStoreElement.getAttribute(
+              storeElement.getAttribute(
                 'data-name'
-              ) ||
-                selectedStoreElement.querySelector(
-                  '.store-name'
-                )?.textContent
+              )
+            ) ||
+            cleanText(
+              storeElement.querySelector(
+                '.store-name'
+              )?.textContent
+            ) ||
+            cleanText(
+              storeElement.querySelector(
+                '.my-store-name'
+              )?.textContent
             );
 
-          if (selectedStoreName) {
-            store = selectedStoreName;
-
+          if (store) {
             diagnostics.storeSource =
-              'DOM:.fulfilment-store-item';
+              'DOM:.store-item[data-store-id]';
           }
 
-          const stockStatusElement =
-            selectedStoreElement.querySelector(
-              '.stock-status'
+          /*
+           * ----------------------------------------------------------
+           * PRIMARY AVAILABILITY:
+           * data-products
+           * ----------------------------------------------------------
+           */
+
+          const productsJson =
+            storeElement.getAttribute(
+              'data-products'
             );
 
-          const stockStatusText =
-            cleanText(
-              stockStatusElement?.textContent
-            );
+          let productsData:
+            StoreProductData | null =
+            null;
+
+          if (productsJson) {
+            try {
+              productsData =
+                JSON.parse(
+                  productsJson
+                ) as StoreProductData;
+            } catch {
+              productsData = null;
+            }
+          }
+
+          /*
+           * If we know the SKU and the store provides product-level
+           * availability, use that as the authoritative result.
+           */
+          if (
+            sku &&
+            productsData
+          ) {
+            const available =
+              Array.isArray(
+                productsData.available
+              )
+                ? productsData.available
+                : [];
+
+            const unavailable =
+              Array.isArray(
+                productsData.unavailable
+              )
+                ? productsData.unavailable
+                : [];
+
+            const lowStock =
+              Array.isArray(
+                productsData.lowStock
+              )
+                ? productsData.lowStock
+                : [];
+
+            if (
+              available.includes(sku)
+            ) {
+              availability =
+                'in_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item[data-products].available';
+            } else if (
+              lowStock.includes(sku)
+            ) {
+              /*
+               * Low stock still means the product is available.
+               */
+              availability =
+                'in_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item[data-products].lowStock';
+            } else if (
+              unavailable.includes(sku)
+            ) {
+              availability =
+                'out_of_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item[data-products].unavailable';
+            }
+          }
+
+          /*
+           * ----------------------------------------------------------
+           * SECONDARY AVAILABILITY:
+           * data-status
+           * ----------------------------------------------------------
+           *
+           * Example:
+           *
+           * data-status="available"
+           */
 
           if (
-            stockStatusElement?.classList.contains(
+            availability === 'unknown'
+          ) {
+            const status =
+              storeElement.getAttribute(
+                'data-status'
+              );
+
+            if (
+              status?.toLowerCase() ===
               'available'
-            ) ||
-            /\bin\s+stock\b/i.test(
-              stockStatusText || ''
-            )
+            ) {
+              availability =
+                'in_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item[data-status=available]';
+            } else if (
+              status?.toLowerCase() ===
+                'unavailable' ||
+              status?.toLowerCase() ===
+                'out-of-stock' ||
+              status?.toLowerCase() ===
+                'out_of_stock'
+            ) {
+              availability =
+                'out_of_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item[data-status=unavailable]';
+            }
+          }
+
+          /*
+           * ----------------------------------------------------------
+           * THIRDARY AVAILABILITY:
+           * visible "In Stock" / "Out of Stock" text inside THIS
+           * exact store element.
+           * ----------------------------------------------------------
+           */
+
+          if (
+            availability === 'unknown'
           ) {
-            storeAvailability =
-              'in_stock';
+            const statusText =
+              cleanText(
+                storeElement.querySelector(
+                  '.text-status.pdp'
+                )?.textContent
+              ) ||
+              cleanText(
+                storeElement.querySelector(
+                  '.store-status'
+                )?.textContent
+              );
 
-            diagnostics.storeAvailabilitySource =
-              'DOM:.fulfilment-store-item .stock-status.available';
-          } else if (
-            stockStatusElement?.classList.contains(
-              'unavailable'
-            ) ||
-            stockStatusElement?.classList.contains(
-              'not-available'
-            ) ||
-            /\bno\s+stock\b/i.test(
-              stockStatusText || ''
-            ) ||
-            /\bout\s+of\s+stock\b/i.test(
-              stockStatusText || ''
-            ) ||
-            /\bunavailable\b/i.test(
-              stockStatusText || ''
-            ) ||
-            /\bnot\s+available\b/i.test(
-              stockStatusText || ''
-            )
-          ) {
-            storeAvailability =
-              'out_of_stock';
+            if (
+              /\bin\s+stock\b/i.test(
+                statusText || ''
+              )
+            ) {
+              availability =
+                'in_stock';
 
-            diagnostics.storeAvailabilitySource =
-              'DOM:.fulfilment-store-item .stock-status.unavailable';
-          } else if (stockStatusText) {
-            storeAvailability =
-              'check_availability';
+              diagnostics.availabilitySource =
+                'DOM:.store-item .text-status.pdp';
+            } else if (
+              /\bout\s+of\s+stock\b/i.test(
+                statusText || ''
+              ) ||
+              /\bunavailable\b/i.test(
+                statusText || ''
+              ) ||
+              /\bnot\s+available\b/i.test(
+                statusText || ''
+              )
+            ) {
+              availability =
+                'out_of_stock';
 
-            diagnostics.storeAvailabilitySource =
-              'DOM:.fulfilment-store-item unrecognised stock status';
+              diagnostics.availabilitySource =
+                'DOM:.store-item .text-status.pdp';
+            }
           }
         }
 
         /*
-         * -------------------------------------------------------------
-         * SELECTED PRODUCT FULFILMENT FALLBACK
-         * -------------------------------------------------------------
+         * ============================================================
+         * AVAILABILITY FALLBACK
+         * ============================================================
          *
-         * After confirmation, the store list may be hidden or removed.
+         * Only if the exact store element cannot be found at all.
+         *
+         * We deliberately DO NOT use broad product-area text first,
+         * because that caused the false "out_of_stock" result.
          */
 
         if (
-          !store ||
-          storeAvailability === 'unknown'
+          availability === 'unknown'
         ) {
-          const fulfilmentElements =
+          const addToCartElement =
             Array.from(
               document.querySelectorAll(
-                [
-                  '[class*="fulfilment" i]',
-                  '[class*="fulfillment" i]',
-                  '[class*="selected-store" i]',
-                  '[class*="preferred-store" i]',
-                  '[class*="pickup" i]',
-                  '[class*="click-collect" i]',
-                ].join(', ')
+                'button, a'
               )
-            );
-
-          const matchingFulfilmentElements =
-            fulfilmentElements.filter(
+            ).find(
               (element) => {
                 const text =
                   cleanText(
                     element.textContent
                   ) || '';
 
-                return text
-                  .toLowerCase()
-                  .includes(
-                    expectedStoreName.toLowerCase()
-                  );
+                return /\badd\s+to\s+cart\b/i.test(
+                  text
+                );
               }
             );
 
-          /*
-           * Prefer the smallest matching container.
-           */
-          matchingFulfilmentElements.sort(
-            (first, second) => {
-              const firstLength =
-                cleanText(
-                  first.textContent
-                )?.length ??
-                Number.MAX_SAFE_INTEGER;
+          if (addToCartElement) {
+            availability =
+              'in_stock';
 
-              const secondLength =
-                cleanText(
-                  second.textContent
-                )?.length ??
-                Number.MAX_SAFE_INTEGER;
-
-              return (
-                firstLength - secondLength
-              );
-            }
-          );
-
-          const fulfilmentElement =
-            matchingFulfilmentElements[0] ||
-            null;
-
-          const fulfilmentText =
-            cleanText(
-              fulfilmentElement?.textContent
-            );
-
-          if (fulfilmentText) {
-            store = expectedStoreName;
-
-            diagnostics.storeSource =
-              'DOM:selected-product-fulfilment-section';
-
-            const explicitlyUnavailable =
-              /\bunavailable\b/i.test(
-                fulfilmentText
-              ) ||
-              /\bnot\s+available\b/i.test(
-                fulfilmentText
-              ) ||
-              /\bout\s+of\s+stock\b/i.test(
-                fulfilmentText
-              ) ||
-              /\bno\s+stock\b/i.test(
-                fulfilmentText
-              );
-
-            const explicitlyAvailable =
-              /\bin\s+stock\b/i.test(
-                fulfilmentText
-              ) ||
-              /\bpick\s+up\s+today\b/i.test(
-                fulfilmentText
-              ) ||
-              /\bavailable\b/i.test(
-                fulfilmentText
-              );
-
-            if (
-              explicitlyAvailable &&
-              !explicitlyUnavailable
-            ) {
-              storeAvailability =
-                'in_stock';
-
-              diagnostics.storeAvailabilitySource =
-                'TEXT:selected-fulfilment-section-in-stock';
-            } else if (
-              explicitlyUnavailable
-            ) {
-              storeAvailability =
-                'out_of_stock';
-
-              diagnostics.storeAvailabilitySource =
-                'TEXT:selected-fulfilment-section-unavailable';
-            } else {
-              storeAvailability =
-                'check_availability';
-
-              diagnostics.storeAvailabilitySource =
-                'TEXT:selected-fulfilment-section';
-            }
+            diagnostics.availabilitySource =
+              'FALLBACK:DOM:Add-to-Cart';
           }
         }
 
         /*
-         * -------------------------------------------------------------
-         * HEADER STORE FALLBACK
-         * -------------------------------------------------------------
-         *
-         * Only accept a header store if it explicitly contains the
-         * expected store name.
-         */
-
-        if (!store) {
-          const storeSelectors = [
-            '.my-store-link',
-            '.header-session .my-store-link',
-            '[class*="selected-store" i]',
-            '[class*="preferred-store" i]',
-          ];
-
-          for (const selector of storeSelectors) {
-            const value = getText(selector);
-
-            if (
-              value &&
-              value
-                .toLowerCase()
-                .includes(
-                  expectedStoreName.toLowerCase()
-                )
-            ) {
-              store = expectedStoreName;
-
-              diagnostics.storeSource =
-                `DOM:${selector}`;
-
-              break;
-            }
-          }
-        }
-
-        /*
-         * -------------------------------------------------------------
-         * STORE AVAILABILITY FALLBACK
-         * -------------------------------------------------------------
-         *
-         * Only use general product availability if the expected store
-         * itself has already been confirmed.
-         */
-
-        if (
-          store === expectedStoreName &&
-          storeAvailability === 'unknown' &&
-          availability !== 'unknown'
-        ) {
-          storeAvailability =
-            availability;
-
-          diagnostics.storeAvailabilitySource =
-            'FALLBACK:confirmed-store-plus-product-availability';
-        }
-
-        /*
-         * -------------------------------------------------------------
+         * ============================================================
          * CANONICAL URL
-         * -------------------------------------------------------------
+         * ============================================================
          */
 
         const canonicalUrl =
@@ -1442,21 +1435,22 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
           originalPrice,
           saleEndDate,
           availability,
-          storeAvailability,
           store,
           canonicalUrl,
           diagnostics,
         };
       },
       {
-        expectedStoreName: this.storeName,
-        expectedStoreId: this.storeId,
+        expectedStoreName:
+          this.storeName,
+        expectedStoreId:
+          this.storeId,
       }
     );
   }
 
   /**
-   * Main product scraping method.
+   * Main scraping method.
    */
   async scrapeProduct(
     url: string
@@ -1466,29 +1460,29 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
     try {
       await browserService.initialize();
 
-      page = await browserService.createPage();
+      page =
+        await browserService.createPage();
 
       logger.info(
         `Scraping Supercheap Auto product: ${url} ` +
-          `using store ${this.storeName} (${this.postalCode})`
+          `using store ${this.storeName} ` +
+          `(${this.postalCode})`
       );
 
       /*
-       * -------------------------------------------------------------
-       * INITIAL PRODUCT NAVIGATION
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
+       * NAVIGATE TO PRODUCT
+       * ------------------------------------------------------------
        */
 
       await page.goto(url, {
         waitUntil: 'domcontentloaded',
-        timeout: this.navigationTimeout,
+        timeout:
+          this.navigationTimeout,
       });
 
-      /*
-       * Store the final URL after initial navigation because the
-       * website may redirect to a canonical product URL.
-       */
-      const productPageUrl = page.url();
+      const productPageUrl =
+        page.url();
 
       if (
         this.isSearchResultsUrl(
@@ -1502,15 +1496,14 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
         );
       }
 
-      /*
-       * Allow the initial product page to render.
-       */
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(
+        1500
+      );
 
       /*
-       * -------------------------------------------------------------
-       * STORE SELECTION
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
+       * SELECT STORE
+       * ------------------------------------------------------------
        */
 
       await this.ensureStoreSelected(
@@ -1519,8 +1512,8 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       );
 
       /*
-       * Do not require networkidle because ecommerce pages often
-       * keep analytics / tracking connections open indefinitely.
+       * Ecommerce pages often keep connections open, so networkidle
+       * is only an optional wait.
        */
       try {
         await page.waitForLoadState(
@@ -1532,15 +1525,19 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       } catch {
         logger.debug(
           `Supercheap Auto networkidle timeout for ${url}; ` +
-            `continuing with the rendered product page`
+            `continuing with rendered page`
         );
       }
 
-      await page.waitForTimeout(2000);
+      /*
+       * Give the store/product fulfilment AJAX time to update.
+       */
+      await page.waitForTimeout(
+        2000
+      );
 
       /*
-       * Make absolutely sure that store-selection interactions did
-       * not leave us on a search page.
+       * Ensure store selection did not send us to search.
        */
       await this.validateProductPage(
         page,
@@ -1548,36 +1545,44 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       );
 
       /*
-       * -------------------------------------------------------------
-       * PRODUCT EXTRACTION
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
+       * EXTRACT
+       * ------------------------------------------------------------
        */
 
       const product =
-        await this.extractProduct(page);
+        await this.extractProduct(
+          page
+        );
 
       logger.info(
         `Supercheap Auto extraction result for ${url}: ` +
           `${JSON.stringify({
-            finalPageUrl: page.url(),
-            name: product.name,
-            sku: product.sku,
-            price: product.price,
-            originalPrice: product.originalPrice,
-            saleEndDate: product.saleEndDate,
-            availability: product.availability,
-            storeAvailability:
-              product.storeAvailability,
-            store: product.store,
+            finalPageUrl:
+              page.url(),
+            name:
+              product.name,
+            sku:
+              product.sku,
+            price:
+              product.price,
+            originalPrice:
+              product.originalPrice,
+            saleEndDate:
+              product.saleEndDate,
+            availability:
+              product.availability,
+            store:
+              product.store,
             diagnostics:
               product.diagnostics,
           })}`
       );
 
       /*
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
        * WARNINGS
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
        */
 
       if (!product.name) {
@@ -1588,11 +1593,13 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
 
       if (!product.sku) {
         logger.warn(
-          `Supercheap Auto item number could not be extracted for ${url}`
+          `Supercheap Auto SKU could not be extracted for ${url}`
         );
       }
 
-      if (product.price === null) {
+      if (
+        product.price === null
+      ) {
         logger.warn(
           `Supercheap Auto price could not be extracted for ${url}`
         );
@@ -1600,12 +1607,14 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
 
       if (!product.store) {
         logger.warn(
-          `Supercheap Auto could not confirm the selected store ` +
-            `for ${url}`
+          `Supercheap Auto could not confirm store ${this.storeName} for ${url}`
         );
       } else if (
-        product.store.toLowerCase() !==
-        this.storeName.toLowerCase()
+        !product.store
+          .toLowerCase()
+          .includes(
+            this.storeName.toLowerCase()
+          )
       ) {
         logger.warn(
           `Supercheap Auto returned store "${product.store}" ` +
@@ -1614,12 +1623,12 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       }
 
       if (
-        product.storeAvailability ===
+        product.availability ===
         'unknown'
       ) {
         logger.warn(
-          `Supercheap Auto store availability for ` +
-            `${this.storeName} could not be determined for ${url}`
+          `Supercheap Auto availability could not be determined ` +
+            `for SKU ${product.sku} at ${this.storeName}`
         );
       }
 
@@ -1632,34 +1641,39 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       );
 
       /*
-       * -------------------------------------------------------------
-       * RETURN NORMALISED PRODUCT
-       * -------------------------------------------------------------
+       * ------------------------------------------------------------
+       * RETURN
+       * ------------------------------------------------------------
        */
 
       return {
-        site: 'supercheapauto',
+        site:
+          'supercheapauto',
+
         url:
           product.canonicalUrl ||
           page.url(),
 
-        name: product.name,
-        sku: product.sku,
+        name:
+          product.name,
 
-        price: product.price,
+        sku:
+          product.sku,
+
+        price:
+          product.price,
+
         originalPrice:
           product.originalPrice,
 
         saleEndDate:
           product.saleEndDate,
 
-        currency: 'NZD',
+        currency:
+          'NZD',
 
         availability:
           product.availability,
-
-        storeAvailability:
-          product.storeAvailability,
 
         store:
           product.store ||
@@ -1680,7 +1694,9 @@ export class SupercheapAutoAdapter implements ProductScraperAdapter {
       throw error;
     } finally {
       if (page) {
-        await browserService.closePage(page);
+        await browserService.closePage(
+          page
+        );
       }
     }
   }
