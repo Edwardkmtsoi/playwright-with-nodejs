@@ -646,7 +646,6 @@ export class SupercheapAutoAdapter
   ): Promise<ExtractedProduct> {
     return page.evaluate(
       ({
-        expectedStoreName,
         expectedStoreId,
       }): ExtractedProduct => {
         const cleanText = (
@@ -1441,8 +1440,6 @@ export class SupercheapAutoAdapter
         };
       },
       {
-        expectedStoreName:
-          this.storeName,
         expectedStoreId:
           this.storeId,
       }
