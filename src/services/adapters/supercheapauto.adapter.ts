@@ -117,6 +117,57 @@ export class SupercheapAutoAdapter
   }
 
   /**
+   * PERFORMANCE: Fast-path check.
+   *
+   * If the target store's element is already present on the page
+   * with a `data-products` attribute, the fulfilment data for our
+   * store is already loaded (most likely because the browser
+   * context/cookies persisted the store choice from a previous
+   * scrape). In that case we can skip the entire click-through
+   * store-selector UI flow, which is the single largest cost in
+   * this adapter.
+   *
+   * This reuses the exact selector/attribute that extractProduct()
+   * already relies on, so it can't introduce a result that
+   * extraction wasn't already going to trust anyway.
+   */
+  private async isStoreAlreadyConfigured(
+    page: Page
+  ): Promise<boolean> {
+    const storeElement = page
+      .locator(
+        [
+          `.store-item[data-store-id="${this.storeId}"]`,
+          `.store-item[data-id="${this.storeId}"]`,
+          `.fulfilment-store-item[data-id="${this.storeId}"]`,
+          `.fulfilment-store-item[data-store-id="${this.storeId}"]`,
+        ].join(', ')
+      )
+      .first();
+
+    const count = await storeElement
+      .count()
+      .catch(() => 0);
+
+    if (count === 0) {
+      return false;
+    }
+
+    const productsAttr = await storeElement
+      .getAttribute('data-products')
+      .catch(() => null);
+
+    const isConfigured = Boolean(productsAttr);
+
+    logger.debug(
+      `Supercheap Auto fast-path store check: ` +
+        `${isConfigured ? 'already configured' : 'not configured'}`
+    );
+
+    return isConfigured;
+  }
+
+  /**
    * Open the Supercheap Auto store selector.
    */
   private async openStoreSelector(
@@ -559,9 +610,13 @@ export class SupercheapAutoAdapter
       );
 
       /*
-       * Allow the fulfilment information to update.
+       * PERFORMANCE: Allow the fulfilment information to update.
+       * Reduced from 2500ms -> 1200ms; in practice the AJAX update
+       * on this page completes well under a second once the confirm
+       * click resolves, and validateProductPage()/extractProduct()
+       * downstream will still catch a genuinely stale state.
        */
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1200);
 
       await this.restoreProductPage(
         page,
@@ -1493,30 +1548,55 @@ export class SupercheapAutoAdapter
         );
       }
 
-      await page.waitForTimeout(
-        1500
-      );
+      /*
+       * PERFORMANCE: Reduced from 1500ms -> 800ms. domcontentloaded
+       * has already fired; this just gives client-side rendering a
+       * brief head start before we start querying the DOM.
+       */
+      await page.waitForTimeout(800);
 
       /*
        * ------------------------------------------------------------
        * SELECT STORE
        * ------------------------------------------------------------
+       *
+       * PERFORMANCE: Fast path. If the fulfilment data for our store
+       * is already present on the page (persisted store cookie from
+       * a previous scrape in the same browser context), skip the
+       * entire click-through store-selector UI flow. This is the
+       * single biggest cost in the adapter, so we only pay it when
+       * we actually need to.
        */
 
-      await this.ensureStoreSelected(
-        page,
-        productPageUrl
-      );
+      const alreadyConfigured =
+        await this.isStoreAlreadyConfigured(
+          page
+        );
+
+      if (alreadyConfigured) {
+        logger.info(
+          `Supercheap Auto store ${this.storeName} already ` +
+            `configured for this session; skipping store selector UI`
+        );
+      } else {
+        await this.ensureStoreSelected(
+          page,
+          productPageUrl
+        );
+      }
 
       /*
        * Ecommerce pages often keep connections open, so networkidle
        * is only an optional wait.
+       *
+       * PERFORMANCE: Reduced ceiling from 5000ms -> 2000ms since this
+       * frequently times out anyway on this site.
        */
       try {
         await page.waitForLoadState(
           'networkidle',
           {
-            timeout: 5000,
+            timeout: 2000,
           }
         );
       } catch {
@@ -1528,10 +1608,14 @@ export class SupercheapAutoAdapter
 
       /*
        * Give the store/product fulfilment AJAX time to update.
+       *
+       * PERFORMANCE: Reduced from 2000ms -> 900ms, and skipped
+       * entirely when we took the fast path above (nothing changed,
+       * so there's no AJAX update to wait for).
        */
-      await page.waitForTimeout(
-        2000
-      );
+      if (!alreadyConfigured) {
+        await page.waitForTimeout(900);
+      }
 
       /*
        * Ensure store selection did not send us to search.
@@ -1547,10 +1631,44 @@ export class SupercheapAutoAdapter
        * ------------------------------------------------------------
        */
 
-      const product =
+      let product =
         await this.extractProduct(
           page
         );
+
+      /*
+       * PERFORMANCE SAFETY NET: If the fast path assumed the store
+       * was already configured but availability came back unknown,
+       * fall back to the full explicit store-selection flow and
+       * re-extract. This only costs extra time in the rare case the
+       * fast-path assumption was wrong — normal runs never hit it.
+       */
+      if (
+        alreadyConfigured &&
+        product.availability === 'unknown'
+      ) {
+        logger.warn(
+          `Supercheap Auto fast-path store assumption did not yield ` +
+            `availability for ${url}; falling back to explicit store selection`
+        );
+
+        await this.ensureStoreSelected(
+          page,
+          productPageUrl
+        );
+
+        await page.waitForTimeout(900);
+
+        await this.validateProductPage(
+          page,
+          productPageUrl
+        );
+
+        product =
+          await this.extractProduct(
+            page
+          );
+      }
 
       logger.info(
         `Supercheap Auto extraction result for ${url}: ` +
