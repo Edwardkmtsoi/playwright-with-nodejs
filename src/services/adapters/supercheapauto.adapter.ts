@@ -1,11 +1,13 @@
-import { Page, Locator } from 'playwright';
+import { Page } from 'playwright';
 import logger from '../../config/logger';
 import { browserService } from '../browser.service';
+import { ProductScraperAdapter } from './scraper-adapter.interface';
 import {
   ProductAvailability,
   SupercheapAutoScrapedProduct,
 } from '../../types/product-scrape.types';
-import { ProductScraperAdapter } from './scraper-adapter.interface';
+
+type Availability = ProductAvailability;
 
 interface ExtractionDiagnostics {
   nameSource: string | null;
@@ -23,13 +25,13 @@ interface ExtractedProduct {
   price: number | null;
   originalPrice: number | null;
   saleEndDate: string | null;
-  availability: ProductAvailability;
+  availability: Availability;
   store: string | null;
   canonicalUrl: string;
   diagnostics: ExtractionDiagnostics;
 }
 
-interface StoreProductData {
+interface StoreProducts {
   available?: string[];
   unavailable?: string[];
   specialProduct?: string[];
@@ -41,56 +43,77 @@ export class SupercheapAutoAdapter
 {
   readonly site = 'supercheapauto' as const;
 
-  /**
-   * Configured Supercheap Auto store.
-   *
-   * SCA Wairau Park
-   * Store ID: 7030
-   * Postcode: 0627
+  /*
+   * ============================================================
+   * CONFIGURATION
+   * ============================================================
    */
-  private readonly storeName = 'SCA Wairau Park';
-  private readonly storeId = '7030';
-  private readonly postalCode = '0627';
 
-  /**
-   * Performance-related timeouts.
-   *
-   * We avoid arbitrary long sleeps and networkidle.
-   * Instead, we wait for the actual elements/data we need.
-   */
-  private readonly navigationTimeout = 30000;
-  private readonly productWaitTimeout = 10000;
-  private readonly storeWaitTimeout = 8000;
-  private readonly selectorTimeout = 8000;
-  private readonly inventoryWaitTimeout = 12000;
+  private readonly storeName =
+    'SCA Wairau Park';
 
-  /**
-   * Determine whether this adapter can handle the supplied URL.
+  private readonly storeId =
+    '7030';
+
+  private readonly postalCode =
+    '0627';
+
+  /*
+   * Keep navigation reasonably fast.
+   * We do NOT use networkidle because ecommerce pages
+   * can keep analytics requests open indefinitely.
    */
+  private readonly navigationTimeout =
+    45000;
+
+  private readonly productWaitTimeout =
+    10000;
+
+  private readonly storeWaitTimeout =
+    12000;
+
+  private readonly inventoryWaitTimeout =
+    10000;
+
+  /*
+   * ============================================================
+   * URL HANDLING
+   * ============================================================
+   */
+
   canHandle(url: string): boolean {
     try {
-      const parsedUrl = new URL(url);
-      const hostname = parsedUrl.hostname.toLowerCase();
+      const parsedUrl =
+        new URL(url);
+
+      const hostname =
+        parsedUrl.hostname.toLowerCase();
 
       return (
-        hostname === 'supercheapauto.co.nz' ||
-        hostname.endsWith('.supercheapauto.co.nz')
+        hostname ===
+          'supercheapauto.co.nz' ||
+        hostname.endsWith(
+          '.supercheapauto.co.nz'
+        )
       );
     } catch {
       return false;
     }
   }
 
-  /**
-   * Detect Supercheap Auto search-result pages.
-   */
-  private isSearchResultsUrl(url: string): boolean {
+  private isSearchResultsUrl(
+    url: string
+  ): boolean {
     try {
-      const parsedUrl = new URL(url);
+      const parsedUrl =
+        new URL(url);
 
       return (
-        parsedUrl.pathname === '/search' ||
-        parsedUrl.pathname.startsWith('/search/')
+        parsedUrl.pathname ===
+          '/search' ||
+        parsedUrl.pathname.startsWith(
+          '/search/'
+        )
       );
     } catch {
       return (
@@ -100,37 +123,12 @@ export class SupercheapAutoAdapter
     }
   }
 
-  /**
-   * Restore the product page if store selection accidentally
-   * navigates to a search page.
+  /*
+   * ============================================================
+   * PRODUCT PAGE
+   * ============================================================
    */
-  private async restoreProductPage(
-    page: Page,
-    productUrl: string
-  ): Promise<void> {
-    if (!this.isSearchResultsUrl(page.url())) {
-      return;
-    }
 
-    logger.warn(
-      `Supercheap Auto navigated to search page ${page.url()}. ` +
-        `Restoring product page.`
-    );
-
-    await page.goto(productUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: this.navigationTimeout,
-    });
-
-    await this.waitForProductPage(page);
-  }
-
-  /**
-   * Wait for the product page to become usable.
-   *
-   * We intentionally do NOT use networkidle because ecommerce
-   * pages can keep analytics/tracking requests open for a long time.
-   */
   private async waitForProductPage(
     page: Page
   ): Promise<void> {
@@ -139,485 +137,48 @@ export class SupercheapAutoAdapter
       .first()
       .waitFor({
         state: 'visible',
-        timeout: this.productWaitTimeout,
+        timeout:
+          this.productWaitTimeout,
       })
       .catch(() => {
         logger.debug(
-          'Supercheap Auto H1 was not detected within the normal wait period.'
+          'Supercheap Auto H1 was not detected within the expected time.'
         );
       });
   }
 
-  /**
-   * Check whether the configured store is already present.
-   *
-   * If store 7030 is already present, there is no need to open
-   * the store selector and perform another postcode search.
-   */
-  private async isConfiguredStorePresent(
-    page: Page
-  ): Promise<boolean> {
-    const store = page
-      .locator(
-        [
-          `.store-item[data-store-id="${this.storeId}"]`,
-          `.store-item[data-id="${this.storeId}"]`,
-          `.fulfilment-store-item[data-store-id="${this.storeId}"]`,
-          `.fulfilment-store-item[data-id="${this.storeId}"]`,
-        ].join(', ')
-      )
-      .first();
-
-    return store
-      .isVisible({
-        timeout: 3000,
-      })
-      .catch(() => false);
-  }
-
-  /**
-   * Open the Supercheap Auto store selector.
-   */
-  private async openStoreSelector(
-    page: Page
-  ): Promise<void> {
-    const changeStoreButton = page
-      .locator(
-        [
-          'button:has-text("Change store")',
-          'a:has-text("Change store")',
-          'button:has-text("Change Store")',
-          'a:has-text("Change Store")',
-          '[class*="change-store" i]:has-text("Change store")',
-          '[class*="change-location" i]:has-text("Change store")',
-        ].join(', ')
-      )
-      .first();
-
-    const visible =
-      await changeStoreButton
-        .isVisible({
-          timeout: 3000,
-        })
-        .catch(() => false);
-
-    if (visible) {
-      logger.debug(
-        'Opening Supercheap Auto store selector.'
-      );
-
-      await changeStoreButton.click({
-        timeout: this.selectorTimeout,
-      });
-    }
-
-    const preferredStoreButton =
-      page.locator(
-        '#change-preferred-store-button'
-      );
-
-    const preferredVisible =
-      await preferredStoreButton
-        .isVisible({
-          timeout: 2000,
-        })
-        .catch(() => false);
-
-    if (preferredVisible) {
-      await preferredStoreButton.click({
-        timeout: this.selectorTimeout,
-      });
-    }
-  }
-
-  /**
-   * Find the store postcode/suburb input.
-   *
-   * We explicitly exclude the global product search input.
-   */
-  private async findStorePostcodeInput(
-    page: Page
-  ): Promise<Locator> {
-    const postcodeInput = page
-      .locator(
-        [
-          '.fulfilment-store-selector input[placeholder*="postcode" i]',
-          '.fulfilment-store-selector input[placeholder*="suburb" i]',
-
-          '.fulfilment-store-modal input[placeholder*="postcode" i]',
-          '.fulfilment-store-modal input[placeholder*="suburb" i]',
-
-          '.store-locator-modal input[placeholder*="postcode" i]',
-          '.store-locator-modal input[placeholder*="suburb" i]',
-
-          '.store-selection-modal input[placeholder*="postcode" i]',
-          '.store-selection-modal input[placeholder*="suburb" i]',
-
-          '[class*="fulfilment" i] input[placeholder*="postcode" i]',
-          '[class*="fulfilment" i] input[placeholder*="suburb" i]',
-
-          '[class*="store-locator" i] input[placeholder*="postcode" i]',
-          '[class*="store-locator" i] input[placeholder*="suburb" i]',
-
-          'input[placeholder*="postcode or suburb" i]:not([name="q"])',
-          'input[placeholder*="suburb or postcode" i]:not([name="q"])',
-
-          'input[placeholder*="postcode" i]:not([name="q"])',
-          'input[name*="postcode" i]:not([name="q"])',
-          'input[name*="postal" i]:not([name="q"])',
-          'input[id*="postcode" i]:not([name="q"])',
-          'input[id*="postal" i]:not([name="q"])',
-        ].join(', ')
-      )
-      .first();
-
-    await postcodeInput.waitFor({
-      state: 'visible',
-      timeout: this.storeWaitTimeout,
-    });
-
-    const details =
-      await postcodeInput.evaluate(
-        (
-          element: HTMLInputElement
-        ) => ({
-          id: element.id || null,
-          name: element.name || null,
-          type: element.type || null,
-          placeholder:
-            element.placeholder || null,
-          className:
-            element.className || null,
-        })
-      );
-
-    logger.debug(
-      `Supercheap Auto store input found: ${JSON.stringify(details)}`
-    );
-
-    if (
-      details.name?.toLowerCase() === 'q' ||
-      /search products|what are you looking for/i.test(
-        details.placeholder || ''
-      )
-    ) {
-      throw new Error(
-        `Selected input is the global product search input: ` +
-          `${JSON.stringify(details)}`
-      );
-    }
-
-    return postcodeInput;
-  }
-
-  /**
-   * Search for the configured store.
-   */
-  private async searchForStore(
-    page: Page
-  ): Promise<void> {
-    const searchButton = page
-      .locator(
-        [
-          '.fulfilment-store-selector button:has-text("Search")',
-          '.fulfilment-store-modal button:has-text("Search")',
-          '.store-locator-modal button:has-text("Search")',
-          '.store-selection-modal button:has-text("Search")',
-
-          '[class*="fulfilment" i] button:has-text("Search")',
-          '[class*="store-locator" i] button:has-text("Search")',
-
-          'button[aria-label*="search store" i]',
-          'button:has-text("Find Stores")',
-          'button:has-text("Find stores")',
-        ].join(', ')
-      )
-      .first();
-
-    const visible =
-      await searchButton
-        .isVisible({
-          timeout: 3000,
-        })
-        .catch(() => false);
-
-    if (visible) {
-      await searchButton.click({
-        timeout: this.selectorTimeout,
-      });
-    }
-  }
-
-  /**
-   * Find the configured store.
-   */
-  private async findConfiguredStore(
-    page: Page
-  ): Promise<Locator> {
-    const store = page
-      .locator(
-        [
-          `.store-item[data-store-id="${this.storeId}"]`,
-          `.store-item[data-id="${this.storeId}"]`,
-
-          `.fulfilment-store-item[data-store-id="${this.storeId}"]`,
-          `.fulfilment-store-item[data-id="${this.storeId}"]`,
-
-          `.store-item:has(.store-name:text-is("${this.storeName}"))`,
-          `.fulfilment-store-item:has(.store-name:text-is("${this.storeName}"))`,
-        ].join(', ')
-      )
-      .first();
-
-    await store.waitFor({
-      state: 'visible',
-      timeout: this.storeWaitTimeout,
-    });
-
-    return store;
-  }
-
-  /**
-   * Validate that the selected store is really Wairau Park.
-   */
-  private async validateConfiguredStore(
-    store: Locator
-  ): Promise<void> {
-    const details =
-      await store.evaluate(
-        (element: HTMLElement) => ({
-          storeId:
-            element.getAttribute(
-              'data-store-id'
-            ) ||
-            element.getAttribute(
-              'data-id'
-            ),
-
-          storeName:
-            element.getAttribute(
-              'data-name'
-            ) ||
-            element
-              .querySelector(
-                '.store-name'
-              )
-              ?.textContent
-              ?.replace(/\s+/g, ' ')
-              .trim() ||
-            element
-              .querySelector(
-                '.my-store-name'
-              )
-              ?.textContent
-              ?.replace(/\s+/g, ' ')
-              .trim() ||
-            null,
-
-          status:
-            element.getAttribute(
-              'data-status'
-            ),
-        })
-      );
-
-    const matchesId =
-      details.storeId ===
-      this.storeId;
-
-    const matchesName =
-      details.storeName
-        ?.toLowerCase()
-        .includes(
-          this.storeName.toLowerCase()
-        );
-
-    if (
-      !matchesId &&
-      !matchesName
-    ) {
-      throw new Error(
-        `Unexpected Supercheap Auto store returned: ` +
-          `${JSON.stringify(details)}`
-      );
-    }
-
-    logger.debug(
-      `Confirmed Supercheap Auto store: ${JSON.stringify(details)}`
-    );
-  }
-
-  /**
-   * Confirm the store selection if the UI provides a confirmation button.
-   */
-  private async confirmStoreSelection(
-    page: Page
-  ): Promise<void> {
-    const confirmButton = page
-      .locator(
-        [
-          `button.fulfilment-cta[data-selected-id="${this.storeId}"]`,
-          `button.fulfilment-cta[data-preferred-id="${this.storeId}"]`,
-          'button.fulfilment-cta:has-text("Confirm")',
-          'button:has-text("Confirm")',
-        ].join(', ')
-      )
-      .first();
-
-    const visible =
-      await confirmButton
-        .isVisible({
-          timeout: 2000,
-        })
-        .catch(() => false);
-
-    if (!visible) {
-      return;
-    }
-
-    await confirmButton.click({
-      timeout: this.selectorTimeout,
-    });
-  }
-
-  /**
-   * Wait until the configured store element exists.
-   *
-   * This does NOT mean inventory is ready. Inventory is handled
-   * separately by waitForStoreInventory().
-   */
-  private async waitForStoreData(
-    page: Page
-  ): Promise<void> {
-    const store = page
-      .locator(
-        [
-          `.store-item[data-store-id="${this.storeId}"]`,
-          `.store-item[data-id="${this.storeId}"]`,
-          `.fulfilment-store-item[data-store-id="${this.storeId}"]`,
-          `.fulfilment-store-item[data-id="${this.storeId}"]`,
-        ].join(', ')
-      )
-      .first();
-
-    await store.waitFor({
-      state: 'visible',
-      timeout: this.storeWaitTimeout,
-    });
-  }
-
-  /**
-   * Select Wairau Park only when necessary.
-   */
-  private async ensureStoreSelected(
+  private async restoreProductPage(
     page: Page,
     productUrl: string
   ): Promise<void> {
-    /*
-     * First check whether Wairau Park is already present.
-     */
-    const alreadyPresent =
-      await this.isConfiguredStorePresent(
-        page
-      );
-
-    if (alreadyPresent) {
-      logger.info(
-        `Supercheap Auto store ${this.storeName} is already present. ` +
-          `Skipping store selection.`
-      );
-
+    if (
+      !this.isSearchResultsUrl(
+        page.url()
+      )
+    ) {
       return;
     }
 
-    logger.info(
-      `Supercheap Auto store ${this.storeName} not present. ` +
-        `Starting store selection.`
+    logger.warn(
+      `Supercheap Auto navigated to search results. ` +
+        `Restoring product page: ${productUrl}`
     );
 
-    try {
-      await this.openStoreSelector(
-        page
-      );
+    await page.goto(
+      productUrl,
+      {
+        waitUntil:
+          'domcontentloaded',
+        timeout:
+          this.navigationTimeout,
+      }
+    );
 
-      const postcodeInput =
-        await this.findStorePostcodeInput(
-          page
-        );
-
-      /*
-       * Do not press Enter because it can submit the wrong form.
-       */
-      await postcodeInput.fill(
-        this.postalCode
-      );
-
-      await this.searchForStore(
-        page
-      );
-
-      const store =
-        await this.findConfiguredStore(
-          page
-        );
-
-      await this.validateConfiguredStore(
-        store
-      );
-
-      await store.scrollIntoViewIfNeeded();
-
-      await store.click({
-        timeout: this.selectorTimeout,
-      });
-
-      await this.confirmStoreSelection(
-        page
-      );
-
-      /*
-       * Wait for the store element itself.
-       *
-       * Inventory is waited for separately.
-       */
-      await this.waitForStoreData(
-        page
-      );
-
-      /*
-       * Only restore the product page if necessary.
-       */
-      await this.restoreProductPage(
-        page,
-        productUrl
-      );
-
-      logger.info(
-        `Supercheap Auto store ${this.storeName} selected successfully.`
-      );
-    } catch (error) {
-      logger.warn(
-        `Could not select Supercheap Auto store ${this.storeName}: ` +
-          `${
-            error instanceof Error
-              ? error.message
-              : String(error)
-          }`
-      );
-
-      /*
-       * Never allow the scraper to accidentally process a search page.
-       */
-      await this.restoreProductPage(
-        page,
-        productUrl
-      );
-    }
+    await this.waitForProductPage(
+      page
+    );
   }
 
-  /**
-   * Validate that we are still on a product page.
-   */
   private async validateProductPage(
     page: Page,
     expectedProductUrl: string
@@ -631,7 +192,7 @@ export class SupercheapAutoAdapter
       )
     ) {
       throw new Error(
-        `Supercheap Auto is on a search-results page instead of ` +
+        `Supercheap Auto resolved to search results instead of ` +
           `the product page. Current URL: ${currentUrl}; ` +
           `expected: ${expectedProductUrl}`
       );
@@ -658,358 +219,881 @@ export class SupercheapAutoAdapter
       )
     ) {
       throw new Error(
-        `Supercheap Auto returned product search results instead ` +
-          `of the requested product.`
+        `Supercheap Auto returned product search results instead of a product page.`
       );
     }
   }
 
-  /**
-   * Extract the product SKU before waiting for inventory.
+  /*
+   * ============================================================
+   * STORE DETECTION
+   * ============================================================
    *
-   * This is intentionally lightweight.
+   * This is the ACTUAL product-page element:
+   *
+   * <div
+   *   class="store-item pdp available"
+   *   data-store-id="7030"
+   *   data-status="available"
+   *   data-products="..."
+   * >
+   *
+   * This is different from the store-selection modal's:
+   *
+   * .fulfilment-store-item
+   *
+   * We only use .store-item[data-store-id="7030"] for
+   * product availability.
    */
-  private async extractSkuForWaiting(
+
+  private getProductStoreSelector(): string {
+    return (
+      `.store-item[data-store-id="${this.storeId}"]`
+    );
+  }
+
+  private async isStoreAlreadyPresent(
     page: Page
-  ): Promise<string | null> {
-    return page.evaluate(() => {
-      const cleanText = (
-        value:
-          | string
-          | null
-          | undefined
-      ): string | null => {
-        if (!value) {
-          return null;
-        }
+  ): Promise<boolean> {
+    const selector =
+      this.getProductStoreSelector();
 
-        const cleaned =
-          value
-            .replace(/\u00a0/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
+    return page
+      .locator(selector)
+      .first()
+      .isVisible({
+        timeout: 2500,
+      })
+      .catch(() => false);
+  }
 
-        return cleaned || null;
-      };
+  /*
+   * ============================================================
+   * STORE SELECTION
+   * ============================================================
+   */
+
+  private async ensureStoreSelected(
+    page: Page,
+    productUrl: string
+  ): Promise<void> {
+    /*
+     * If Wairau Park is already on the product page,
+     * don't open the store selector at all.
+     *
+     * This is important for performance when n8n makes
+     * many separate calls.
+     */
+    if (
+      await this.isStoreAlreadyPresent(
+        page
+      )
+    ) {
+      logger.info(
+        `Supercheap Auto ${this.storeName} is already present. ` +
+          `Skipping store selection.`
+      );
+
+      return;
+    }
+
+    logger.info(
+      `Selecting Supercheap Auto store ${this.storeName} ` +
+        `(${this.postalCode}), store ID ${this.storeId}`
+    );
+
+    try {
+      /*
+       * --------------------------------------------------------
+       * 1. Open Change Store
+       * --------------------------------------------------------
+       */
+
+      const changeStoreButton =
+        page
+          .locator(
+            [
+              'button:has-text("Change store")',
+              'a:has-text("Change store")',
+              'button:has-text("Change Store")',
+              'a:has-text("Change Store")',
+              '[class*="change-store" i]:has-text("Change store")',
+              '[class*="change-location" i]:has-text("Change store")',
+            ].join(', ')
+          )
+          .first();
+
+      const changeStoreVisible =
+        await changeStoreButton
+          .isVisible({
+            timeout: 3000,
+          })
+          .catch(() => false);
+
+      if (changeStoreVisible) {
+        await changeStoreButton.click({
+          timeout: 5000,
+        });
+      }
 
       /*
-       * First choice:
-       * productID / SKU meta tags.
+       * --------------------------------------------------------
+       * 2. Click "Change" in fulfilment panel if required
+       * --------------------------------------------------------
        */
-      const metaSelectors = [
-        'meta[itemprop="productID"]',
-        'meta[itemprop="sku"]',
-      ];
 
-      for (
-        const selector of metaSelectors
+      const preferredStoreButton =
+        page.locator(
+          '#change-preferred-store-button'
+        );
+
+      const preferredVisible =
+        await preferredStoreButton
+          .isVisible({
+            timeout: 2000,
+          })
+          .catch(() => false);
+
+      if (preferredVisible) {
+        await preferredStoreButton.click({
+          timeout: 5000,
+        });
+      }
+
+      /*
+       * --------------------------------------------------------
+       * 3. Find postcode input
+       * --------------------------------------------------------
+       */
+
+      const postcodeInput =
+        page
+          .locator(
+            [
+              '.fulfilment-store-selector input[placeholder*="postcode" i]',
+              '.fulfilment-store-selector input[placeholder*="suburb" i]',
+
+              '.fulfilment-store-modal input[placeholder*="postcode" i]',
+              '.fulfilment-store-modal input[placeholder*="suburb" i]',
+
+              '.store-locator-modal input[placeholder*="postcode" i]',
+              '.store-locator-modal input[placeholder*="suburb" i]',
+
+              '.store-selection-modal input[placeholder*="postcode" i]',
+              '.store-selection-modal input[placeholder*="suburb" i]',
+
+              '[class*="fulfilment" i] input[placeholder*="postcode" i]',
+              '[class*="fulfilment" i] input[placeholder*="suburb" i]',
+
+              '[class*="store-locator" i] input[placeholder*="postcode" i]',
+              '[class*="store-locator" i] input[placeholder*="suburb" i]',
+
+              'input[placeholder*="postcode or suburb" i]:not([name="q"])',
+              'input[placeholder*="suburb or postcode" i]:not([name="q"])',
+
+              'input[placeholder*="postcode" i]:not([name="q"])',
+              'input[name*="postcode" i]:not([name="q"])',
+              'input[name*="postal" i]:not([name="q"])',
+              'input[id*="postcode" i]:not([name="q"])',
+              'input[id*="postal" i]:not([name="q"])',
+            ].join(', ')
+          )
+          .first();
+
+      await postcodeInput.waitFor({
+        state: 'visible',
+        timeout:
+          this.storeWaitTimeout,
+      });
+
+      const inputDetails =
+        await postcodeInput.evaluate(
+          (
+            element: HTMLInputElement
+          ) => ({
+            id:
+              element.id ||
+              null,
+            name:
+              element.name ||
+              null,
+            type:
+              element.type ||
+              null,
+            placeholder:
+              element.placeholder ||
+              null,
+          })
+        );
+
+      /*
+       * Never accidentally use the global product search.
+       */
+      if (
+        inputDetails.name
+          ?.toLowerCase() ===
+          'q' ||
+        /search products|what are you looking for/i.test(
+          inputDetails.placeholder ||
+            ''
+        )
       ) {
-        const element =
+        throw new Error(
+          `The selected input appears to be the global product search input: ` +
+            `${JSON.stringify(
+              inputDetails
+            )}`
+        );
+      }
+
+      await postcodeInput.fill(
+        this.postalCode
+      );
+
+      /*
+       * --------------------------------------------------------
+       * 4. Search for store
+       * --------------------------------------------------------
+       */
+
+      const storeSearchButton =
+        page
+          .locator(
+            [
+              '.fulfilment-store-selector button:has-text("Search")',
+              '.fulfilment-store-modal button:has-text("Search")',
+              '.store-locator-modal button:has-text("Search")',
+              '.store-selection-modal button:has-text("Search")',
+
+              '[class*="fulfilment" i] button:has-text("Search")',
+              '[class*="store-locator" i] button:has-text("Search")',
+
+              'button[aria-label*="search store" i]',
+              'button:has-text("Find Stores")',
+              'button:has-text("Find stores")',
+            ].join(', ')
+          )
+          .first();
+
+      const searchVisible =
+        await storeSearchButton
+          .isVisible({
+            timeout: 2000,
+          })
+          .catch(() => false);
+
+      if (searchVisible) {
+        await storeSearchButton.click({
+          timeout: 5000,
+        });
+      }
+
+      /*
+       * --------------------------------------------------------
+       * 5. Find Wairau Park
+       * --------------------------------------------------------
+       *
+       * Store selection modal uses:
+       *
+       * .fulfilment-store-item[data-id="7030"]
+       *
+       * This is ONLY for selecting the store.
+       *
+       * Product availability later uses:
+       *
+       * .store-item[data-store-id="7030"]
+       */
+
+      const wairauStore =
+        page
+          .locator(
+            [
+              `.fulfilment-store-item[data-id="${this.storeId}"]`,
+              `.fulfilment-store-item[data-preferred-id="${this.storeId}"]`,
+              `.fulfilment-store-item[data-name="${this.storeName}"]`,
+              `.fulfilment-store-item:has(.store-name:text-is("${this.storeName}"))`,
+            ].join(', ')
+          )
+          .first();
+
+      await wairauStore.waitFor({
+        state: 'visible',
+        timeout:
+          this.storeWaitTimeout,
+      });
+
+      const storeDetails =
+        await wairauStore.evaluate(
+          (element) => ({
+            storeName:
+              element.getAttribute(
+                'data-name'
+              ) ||
+              element
+                .querySelector(
+                  '.store-name'
+                )
+                ?.textContent
+                ?.replace(
+                  /\s+/g,
+                  ' '
+                )
+                .trim() ||
+              null,
+
+            dataId:
+              element.getAttribute(
+                'data-id'
+              ),
+
+            preferredId:
+              element.getAttribute(
+                'data-preferred-id'
+              ),
+          })
+        );
+
+      logger.info(
+        `Supercheap Auto store result: ${JSON.stringify(
+          storeDetails
+        )}`
+      );
+
+      /*
+       * Safety check.
+       */
+      if (
+        storeDetails.dataId !==
+          this.storeId &&
+        storeDetails.preferredId !==
+          this.storeId &&
+        storeDetails.storeName !==
+          this.storeName
+      ) {
+        throw new Error(
+          `Unexpected store selected: ${JSON.stringify(
+            storeDetails
+          )}`
+        );
+      }
+
+      await wairauStore.scrollIntoViewIfNeeded();
+
+      await wairauStore.click({
+        timeout: 5000,
+      });
+
+      /*
+       * --------------------------------------------------------
+       * 6. Confirm selection
+       * --------------------------------------------------------
+       */
+
+      const confirmButton =
+        page
+          .locator(
+            [
+              `button.fulfilment-cta[data-selected-id="${this.storeId}"]`,
+              `button.fulfilment-cta[data-preferred-id="${this.storeId}"]`,
+              'button.fulfilment-cta:has-text("Confirm")',
+            ].join(', ')
+          )
+          .first();
+
+      const confirmVisible =
+        await confirmButton
+          .isVisible({
+            timeout: 5000,
+          })
+          .catch(() => false);
+
+      if (confirmVisible) {
+        await confirmButton.click({
+          timeout: 5000,
+        });
+      }
+
+      /*
+       * Do NOT use networkidle.
+       *
+       * The store selection is AJAX-driven and the product
+       * store element will tell us when the update is ready.
+       */
+      logger.info(
+        `Supercheap Auto store selection submitted for ${this.storeName}`
+      );
+
+      /*
+       * --------------------------------------------------------
+       * 7. Wait for product-page store element
+       * --------------------------------------------------------
+       */
+
+      await this.waitForProductStoreElement(
+        page
+      );
+
+      /*
+       * Make sure we didn't accidentally land on search.
+       */
+      await this.restoreProductPage(
+        page,
+        productUrl
+      );
+    } catch (error) {
+      logger.warn(
+        `Supercheap Auto store selection failed: ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`
+      );
+
+      /*
+       * If store selection failed but the product page itself
+       * is still valid, allow extraction to continue.
+       */
+      await this.restoreProductPage(
+        page,
+        productUrl
+      );
+    }
+  }
+
+  /*
+   * ============================================================
+   * PRODUCT STORE ELEMENT
+   * ============================================================
+   */
+
+  private async waitForProductStoreElement(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      this.getProductStoreSelector();
+
+    await page
+      .locator(selector)
+      .first()
+      .waitFor({
+        state: 'visible',
+        timeout:
+          this.storeWaitTimeout,
+      })
+      .catch(() => {
+        logger.warn(
+          `Supercheap Auto product store element ${selector} ` +
+            `was not detected within ${this.storeWaitTimeout}ms`
+        );
+      });
+  }
+
+  /*
+   * ============================================================
+   * SKU
+   * ============================================================
+   *
+   * The URL itself is a reliable fallback:
+   *
+   * /518963.html
+   * /663684.html
+   */
+
+  private async extractSku(
+    page: Page
+  ): Promise<string | null> {
+    return page.evaluate(
+      () => {
+        const clean =
+          (
+            value:
+              | string
+              | null
+              | undefined
+          ): string | null => {
+            if (!value) {
+              return null;
+            }
+
+            const result =
+              value
+                .replace(
+                  /\u00a0/g,
+                  ' '
+                )
+                .replace(
+                  /\s+/g,
+                  ' '
+                )
+                .trim();
+
+            return result || null;
+          };
+
+        /*
+         * 1. Meta SKU
+         */
+        const meta =
           document.querySelector(
-            selector
+            'meta[itemprop="productID"], meta[itemprop="sku"]'
           );
 
-        const value =
-          cleanText(
-            element?.getAttribute(
+        const metaValue =
+          clean(
+            meta?.getAttribute(
               'content'
             )
           );
 
-        if (value) {
-          return value;
+        if (metaValue) {
+          return metaValue;
         }
-      }
 
-      /*
-       * Second choice:
-       * data-masterid.
-       */
-      const masterId =
-        document.querySelector(
-          '[data-masterid]'
-        );
-
-      const masterIdValue =
-        cleanText(
-          masterId?.getAttribute(
-            'data-masterid'
-          )
-        );
-
-      if (masterIdValue) {
-        return masterIdValue;
-      }
-
-      /*
-       * Third choice:
-       * product number / SKU text.
-       */
-      const selectors = [
-        '.product-number',
-        '[class*="product-number" i]',
-        '[class*="product-code" i]',
-        '[class*="item-number" i]',
-        '[class*="sku" i]',
-      ];
-
-      for (
-        const selector of selectors
-      ) {
-        const element =
+        /*
+         * 2. data-masterid
+         */
+        const master =
           document.querySelector(
-            selector
+            '[data-masterid]'
           );
 
-        const text =
-          cleanText(
-            element?.textContent
+        const masterValue =
+          clean(
+            master?.getAttribute(
+              'data-masterid'
+            )
           );
 
-        if (!text) {
-          continue;
+        if (masterValue) {
+          return masterValue;
         }
+
+        /*
+         * 3. Product number text
+         */
+        const productNumber =
+          document.querySelector(
+            [
+              '.product-number',
+              '[class*="product-number" i]',
+              '[class*="product-code" i]',
+              '[class*="item-number" i]',
+              '[class*="sku" i]',
+            ].join(', ')
+          );
+
+        const productNumberText =
+          clean(
+            productNumber?.textContent
+          );
 
         const match =
-          text.match(
+          productNumberText?.match(
             /(?:Item\s*No\.?|SKU|Product\s*Code)\s*:?\s*([A-Z0-9._-]+)/i
           );
 
         if (match) {
           return match[1];
         }
-      }
 
-      return null;
-    });
+        /*
+         * 4. URL fallback
+         *
+         * /.../663684.html
+         */
+        const urlMatch =
+          window.location.pathname.match(
+            /\/([A-Za-z0-9_-]+)\.html(?:\/)?$/
+          );
+
+        if (urlMatch) {
+          return urlMatch[1];
+        }
+
+        return null;
+      }
+    );
   }
 
-  /**
-   * Wait specifically for the inventory decision for this SKU.
+  /*
+   * ============================================================
+   * WAIT FOR INVENTORY
+   * ============================================================
    *
-   * This is the critical fix for the performance regression.
+   * We wait for the ACTUAL product-page store element:
    *
-   * We DO NOT simply wait for the store element.
+   * .store-item[data-store-id="7030"]
    *
-   * We wait until data-products contains this exact SKU in:
+   * Then we wait until:
    *
-   *   available
-   *   unavailable
-   *   lowStock
+   *   data-products
    *
-   * This allows us to continue immediately once inventory is ready.
+   * contains the SKU.
+   *
+   * Example:
+   *
+   * {
+   *   "available": ["663684"],
+   *   "unavailable": [],
+   *   "specialProduct": [],
+   *   "lowStock": []
+   * }
+   *
+   * We also support:
+   *
+   * data-status="available"
+   *
+   * and:
+   *
+   * <span class="text-status pdp">
+   *   In Stock
+   * </span>
    */
-  private async waitForStoreInventory(
+
+  private async waitForInventory(
     page: Page,
     sku: string | null
-  ): Promise<ProductAvailability> {
-    if (!sku) {
-      logger.warn(
-        'Cannot determine Supercheap Auto inventory because SKU is unknown.'
-      );
-
-      return 'unknown';
-    }
-
-    const storeSelector =
-      `.store-item[data-store-id="${this.storeId}"],` +
-      `.store-item[data-id="${this.storeId}"],` +
-      `.fulfilment-store-item[data-store-id="${this.storeId}"],` +
-      `.fulfilment-store-item[data-id="${this.storeId}"]`;
+  ): Promise<void> {
+    const selector =
+      this.getProductStoreSelector();
 
     try {
-      const result =
-        await page.waitForFunction(
-          ({
-            selector,
-            expectedSku,
-          }) => {
-            const store =
-              document.querySelector(
-                selector
-              );
+      await page.waitForFunction(
+        ({
+          selector,
+          sku,
+        }) => {
+          const store =
+            document.querySelector(
+              selector
+            );
 
-            if (!store) {
-              return null;
-            }
+          if (!store) {
+            return false;
+          }
 
-            const productsJson =
-              store.getAttribute(
-                'data-products'
-              );
+          /*
+           * ------------------------------------------------------
+           * data-status
+           * ------------------------------------------------------
+           */
 
-            if (!productsJson) {
-              return null;
-            }
+          const status =
+            store.getAttribute(
+              'data-status'
+            );
 
+          if (
+            status ===
+              'available' ||
+            status ===
+              'unavailable'
+          ) {
+            return true;
+          }
+
+          /*
+           * ------------------------------------------------------
+           * data-products
+           * ------------------------------------------------------
+           */
+
+          const productsJson =
+            store.getAttribute(
+              'data-products'
+            );
+
+          if (
+            productsJson &&
+            sku
+          ) {
             try {
-              const data =
+              const products =
                 JSON.parse(
                   productsJson
-                ) as {
-                  available?: string[];
-                  unavailable?: string[];
-                  specialProduct?: string[];
-                  lowStock?: string[];
-                };
+                ) as StoreProducts;
 
               const available =
                 Array.isArray(
-                  data.available
+                  products.available
                 )
-                  ? data.available
+                  ? products.available
                   : [];
 
               const unavailable =
                 Array.isArray(
-                  data.unavailable
+                  products.unavailable
                 )
-                  ? data.unavailable
+                  ? products.unavailable
                   : [];
 
               const lowStock =
                 Array.isArray(
-                  data.lowStock
+                  products.lowStock
                 )
-                  ? data.lowStock
+                  ? products.lowStock
                   : [];
 
-              /*
-               * Available.
-               */
               if (
                 available.includes(
-                  expectedSku
-                )
-              ) {
-                return 'in_stock';
-              }
-
-              /*
-               * Low stock is still considered in stock.
-               */
-              if (
-                lowStock.includes(
-                  expectedSku
-                )
-              ) {
-                return 'in_stock';
-              }
-
-              /*
-               * Explicitly unavailable.
-               */
-              if (
+                  sku
+                ) ||
                 unavailable.includes(
-                  expectedSku
+                  sku
+                ) ||
+                lowStock.includes(
+                  sku
                 )
               ) {
-                return 'out_of_stock';
+                return true;
               }
-
-              /*
-               * The inventory object exists but this SKU hasn't
-               * been classified yet.
-               */
-              return null;
             } catch {
-              return null;
+              /*
+               * AJAX may have written incomplete JSON.
+               * Keep polling.
+               */
             }
-          },
-          {
-            selector:
-              storeSelector,
-            expectedSku:
-              sku,
-          },
-          {
-            timeout:
-              this.inventoryWaitTimeout,
-            polling: 200,
           }
-        );
 
-      const availability =
-        (await result.jsonValue()) as
-          | ProductAvailability
-          | null;
+          /*
+           * ------------------------------------------------------
+           * Visible status text
+           * ------------------------------------------------------
+           */
 
-      if (availability) {
-        logger.debug(
-          `Supercheap Auto inventory resolved: ` +
-            `SKU=${sku}, store=${this.storeId}, ` +
-            `availability=${availability}`
-        );
+          const statusText =
+            store
+              .querySelector(
+                '.text-status.pdp'
+              )
+              ?.textContent
+              ?.replace(
+                /\s+/g,
+                ' '
+              )
+              .trim() || '';
 
-        return availability;
-      }
+          if (
+            /\bin\s+stock\b/i.test(
+              statusText
+            ) ||
+            /\bout\s+of\s+stock\b/i.test(
+              statusText
+            ) ||
+            /\bunavailable\b/i.test(
+              statusText
+            )
+          ) {
+            return true;
+          }
+
+          return false;
+        },
+        {
+          selector,
+          sku,
+        },
+        {
+          timeout:
+            this.inventoryWaitTimeout,
+          polling: 200,
+        }
+      );
+
+      logger.debug(
+        `Supercheap Auto inventory data is ready for SKU ${sku}`
+      );
     } catch {
       logger.warn(
-        `Supercheap Auto inventory did not resolve within ` +
-          `${this.inventoryWaitTimeout}ms for SKU ${sku}, ` +
-          `store ${this.storeId}.`
+        `Supercheap Auto inventory did not fully resolve within ` +
+          `${this.inventoryWaitTimeout}ms for SKU ${sku}`
       );
     }
-
-    return 'unknown';
   }
 
-  /**
-   * Extract product information from the rendered page.
+  /*
+   * ============================================================
+   * PRODUCT EXTRACTION
+   * ============================================================
    */
+
   private async extractProduct(
-    page: Page,
-    resolvedAvailability?: ProductAvailability
+    page: Page
   ): Promise<ExtractedProduct> {
+    const expectedStoreId =
+      this.storeId;
+
     return page.evaluate(
       ({
         expectedStoreId,
-        resolvedAvailability,
-      }): ExtractedProduct => {
-        const cleanText = (
-          value:
-            | string
-            | null
-            | undefined
-        ): string | null => {
-          if (!value) {
-            return null;
-          }
+      }) => {
+        /*
+         * --------------------------------------------------------
+         * Types
+         * --------------------------------------------------------
+         */
 
-          const cleaned =
-            value
-              .replace(/\u00a0/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim();
+        const cleanText =
+          (
+            value:
+              | string
+              | null
+              | undefined
+          ): string | null => {
+            if (!value) {
+              return null;
+            }
 
-          return cleaned || null;
-        };
+            const cleaned =
+              value
+                .replace(
+                  /\u00a0/g,
+                  ' '
+                )
+                .replace(
+                  /\s+/g,
+                  ' '
+                )
+                .trim();
 
-        const parsePrice = (
-          value:
-            | string
-            | null
-            | undefined
-        ): number | null => {
-          if (!value) {
-            return null;
-          }
+            return cleaned || null;
+          };
 
-          const text =
-            value
-              .replace(/\u00a0/g, ' ')
-              .replace(/,/g, '')
-              .trim();
+        const parsePrice =
+          (
+            value:
+              | string
+              | null
+              | undefined
+          ): number | null => {
+            if (!value) {
+              return null;
+            }
 
-          const currencyMatch =
-            text.match(
-              /(?:NZD|NZ|\$)\s*(\d+(?:\.\d{1,2})?)/
-            );
+            const text =
+              value
+                .replace(
+                  /\u00a0/g,
+                  ' '
+                )
+                .replace(
+                  /,/g,
+                  ''
+                )
+                .trim();
 
-          if (currencyMatch) {
+            const match =
+              text.match(
+                /(?:NZD|NZ|\$)?\s*(\d+(?:\.\d{1,2})?)/
+              );
+
+            if (!match) {
+              return null;
+            }
+
             const parsed =
               Number(
-                currencyMatch[1]
+                match[1]
               );
 
             return Number.isFinite(
@@ -1017,104 +1101,98 @@ export class SupercheapAutoAdapter
             )
               ? parsed
               : null;
-          }
-
-          const numericMatch =
-            text.match(
-              /^\s*(\d+(?:\.\d{1,2})?)\s*$/
-            );
-
-          if (!numericMatch) {
-            return null;
-          }
-
-          const parsed =
-            Number(
-              numericMatch[1]
-            );
-
-          return Number.isFinite(
-            parsed
-          )
-            ? parsed
-            : null;
-        };
-
-        const getText = (
-          selector: string
-        ): string | null => {
-          const element =
-            document.querySelector(
-              selector
-            );
-
-          return cleanText(
-            element?.textContent
-          );
-        };
-
-        const getAttribute = (
-          selector: string,
-          attribute: string
-        ): string | null => {
-          const element =
-            document.querySelector(
-              selector
-            );
-
-          return cleanText(
-            element?.getAttribute(
-              attribute
-            )
-          );
-        };
-
-        const getFirstText = (
-          selectors: string[]
-        ): {
-          value: string | null;
-          selector: string | null;
-        } => {
-          for (
-            const selector of selectors
-          ) {
-            const value =
-              getText(selector);
-
-            if (value) {
-              return {
-                value,
-                selector,
-              };
-            }
-          }
-
-          return {
-            value: null,
-            selector: null,
           };
-        };
+
+        const getText =
+          (
+            selector: string
+          ): string | null => {
+            const element =
+              document.querySelector(
+                selector
+              );
+
+            return cleanText(
+              element?.textContent
+            );
+          };
+
+        const getAttribute =
+          (
+            selector: string,
+            attribute: string
+          ): string | null => {
+            const element =
+              document.querySelector(
+                selector
+              );
+
+            return cleanText(
+              element?.getAttribute(
+                attribute
+              )
+            );
+          };
+
+        const getFirstText =
+          (
+            selectors: string[]
+          ): {
+            value: string | null;
+            selector: string | null;
+          } => {
+            for (
+              const selector of selectors
+            ) {
+              const value =
+                getText(
+                  selector
+                );
+
+              if (value) {
+                return {
+                  value,
+                  selector,
+                };
+              }
+            }
+
+            return {
+              value: null,
+              selector: null,
+            };
+          };
 
         const diagnostics: ExtractionDiagnostics =
           {
-            nameSource: null,
-            skuSource: null,
-            priceSource: null,
-            originalPriceSource: null,
-            saleEndDateSource: null,
-            storeSource: null,
-            availabilitySource: null,
+            nameSource:
+              null,
+            skuSource:
+              null,
+            priceSource:
+              null,
+            originalPriceSource:
+              null,
+            saleEndDateSource:
+              null,
+            storeSource:
+              null,
+            availabilitySource:
+              null,
           };
 
         /*
-         * ============================================================
+         * --------------------------------------------------------
          * NAME
-         * ============================================================
+         * --------------------------------------------------------
          */
 
         let name:
           string | null = null;
 
+        /*
+         * pageContext
+         */
         const scripts =
           Array.from(
             document.querySelectorAll(
@@ -1160,10 +1238,15 @@ export class SupercheapAutoAdapter
               break;
             }
           } catch {
-            // Ignore malformed pageContext.
+            /*
+             * Ignore malformed pageContext.
+             */
           }
         }
 
+        /*
+         * H1 fallback
+         */
         if (!name) {
           const result =
             getFirstText([
@@ -1175,9 +1258,7 @@ export class SupercheapAutoAdapter
               'h1',
             ]);
 
-          if (
-            result.value
-          ) {
+          if (result.value) {
             name =
               result.value;
 
@@ -1186,6 +1267,9 @@ export class SupercheapAutoAdapter
           }
         }
 
+        /*
+         * Title fallback
+         */
         if (!name) {
           const title =
             cleanText(
@@ -1213,20 +1297,24 @@ export class SupercheapAutoAdapter
           )
         ) {
           name = null;
+
           diagnostics.nameSource =
             null;
         }
 
         /*
-         * ============================================================
+         * --------------------------------------------------------
          * SKU
-         * ============================================================
+         * --------------------------------------------------------
          */
 
         let sku:
           string | null = null;
 
-        const productIdMeta =
+        /*
+         * Meta
+         */
+        const metaSku =
           getAttribute(
             'meta[itemprop="productID"]',
             'content'
@@ -1236,25 +1324,26 @@ export class SupercheapAutoAdapter
             'content'
           );
 
-        if (
-          productIdMeta
-        ) {
+        if (metaSku) {
           sku =
-            productIdMeta;
+            metaSku;
 
           diagnostics.skuSource =
             'META:itemprop=productID/sku';
         }
 
+        /*
+         * data-masterid
+         */
         if (!sku) {
-          const masterId =
+          const master =
             document.querySelector(
               '[data-masterid]'
             );
 
           const value =
             cleanText(
-              masterId?.getAttribute(
+              master?.getAttribute(
                 'data-masterid'
               )
             );
@@ -1268,6 +1357,9 @@ export class SupercheapAutoAdapter
           }
         }
 
+        /*
+         * Product number
+         */
         if (!sku) {
           const result =
             getFirstText([
@@ -1293,26 +1385,50 @@ export class SupercheapAutoAdapter
         }
 
         /*
-         * ============================================================
+         * URL fallback.
+         *
+         * Example:
+         *
+         * /663684.html
+         */
+        if (!sku) {
+          const urlMatch =
+            window.location.pathname.match(
+              /\/([A-Za-z0-9_-]+)\.html(?:\/)?$/
+            );
+
+          if (urlMatch) {
+            sku =
+              urlMatch[1];
+
+            diagnostics.skuSource =
+              'URL:product-id';
+          }
+        }
+
+        /*
+         * --------------------------------------------------------
          * PRICE
-         * ============================================================
+         * --------------------------------------------------------
          */
 
         let price:
           number | null = null;
 
-        const priceSelectors = [
-          '.price-sales .promo-price',
-          '.promo-price',
-          '.price-sales',
-          '[class*="promo-price" i]',
-          '[class*="sale-price" i]',
-          '[class*="price-sales" i]',
-          '[itemprop="price"]',
-        ];
+        const priceSelectors =
+          [
+            '.price-sales .promo-price',
+            '.promo-price',
+            '.price-sales',
+            '[class*="promo-price" i]',
+            '[class*="sale-price" i]',
+            '[class*="price-sales" i]',
+            '[itemprop="price"]',
+          ];
 
         for (
-          const selector of priceSelectors
+          const selector of
+            priceSelectors
         ) {
           const element =
             document.querySelector(
@@ -1335,7 +1451,8 @@ export class SupercheapAutoAdapter
             );
 
           if (
-            candidate !== null
+            candidate !==
+            null
           ) {
             price =
               candidate;
@@ -1348,23 +1465,24 @@ export class SupercheapAutoAdapter
         }
 
         /*
-         * ============================================================
+         * --------------------------------------------------------
          * ORIGINAL PRICE
-         * ============================================================
+         * --------------------------------------------------------
          */
 
         let originalPrice:
           number | null = null;
 
-        const originalPriceSelectors = [
-          '.price-standard .stroke-content',
-          '.price-standard',
-          '.was-label',
-          '[class*="price-standard" i]',
-          '[class*="stroke-content" i]',
-          '[class*="was-price" i]',
-          '[class*="original-price" i]',
-        ];
+        const originalPriceSelectors =
+          [
+            '.price-standard .stroke-content',
+            '.price-standard',
+            '.was-label',
+            '[class*="price-standard" i]',
+            '[class*="stroke-content" i]',
+            '[class*="was-price" i]',
+            '[class*="original-price" i]',
+          ];
 
         for (
           const selector of
@@ -1378,10 +1496,13 @@ export class SupercheapAutoAdapter
             );
 
           if (
-            candidate !== null &&
+            candidate !==
+              null &&
             (
-              price === null ||
-              candidate > price
+              price ===
+                null ||
+              candidate >
+                price
             )
           ) {
             originalPrice =
@@ -1394,12 +1515,17 @@ export class SupercheapAutoAdapter
           }
         }
 
+        /*
+         * "Was $xxx" fallback
+         */
         if (
-          originalPrice === null
+          originalPrice ===
+          null
         ) {
           const bodyText =
             cleanText(
-              document.body?.innerText
+              document.body
+                ?.innerText
             ) || '';
 
           const wasMatch =
@@ -1414,10 +1540,13 @@ export class SupercheapAutoAdapter
               );
 
             if (
-              candidate !== null &&
+              candidate !==
+                null &&
               (
-                price === null ||
-                candidate > price
+                price ===
+                  null ||
+                candidate >
+                  price
               )
             ) {
               originalPrice =
@@ -1430,15 +1559,16 @@ export class SupercheapAutoAdapter
         }
 
         /*
-         * ============================================================
+         * --------------------------------------------------------
          * SALE END DATE
-         * ============================================================
+         * --------------------------------------------------------
          */
 
         let saleEndDate:
-          string | null = null;
+          string | null =
+            null;
 
-        const saleEndResult =
+        const saleEnd =
           getFirstText([
             '.saleprice-end-date',
             '[class*="saleprice-end-date" i]',
@@ -1447,54 +1577,66 @@ export class SupercheapAutoAdapter
             '[class*="promo-end" i]',
           ]);
 
-        if (
-          saleEndResult.value
-        ) {
+        if (saleEnd.value) {
           const dateMatch =
-            saleEndResult.value.match(
+            saleEnd.value.match(
               /(\d{1,2}\/\d{1,2}\/\d{2,4})/
             );
 
           saleEndDate =
             dateMatch
               ? dateMatch[1]
-              : saleEndResult.value;
+              : saleEnd.value;
 
           diagnostics.saleEndDateSource =
-            `DOM:${saleEndResult.selector}`;
+            `DOM:${saleEnd.selector}`;
         }
 
         /*
-         * ============================================================
-         * STORE / AVAILABILITY
-         * ============================================================
+         * ========================================================
+         * STORE + AVAILABILITY
+         * ========================================================
+         *
+         * THIS IS THE IMPORTANT PART.
+         *
+         * Actual HTML:
+         *
+         * <div
+         *   class="store-item pdp available"
+         *   data-store-id="7030"
+         *   data-status="available"
+         *   data-products="..."
+         * >
+         *
+         * <span class="text-status pdp">
+         *   In Stock
+         * </span>
+         *
+         * </div>
          */
-
-        let availability:
-          ProductAvailability =
-            resolvedAvailability ??
-            'unknown';
 
         let store:
           string | null = null;
 
+        let availability:
+          Availability =
+            'unknown';
+
+        const storeSelector =
+          `.store-item[data-store-id="${expectedStoreId}"]`;
+
         const storeElement =
           document.querySelector(
-            `.store-item[data-store-id="${expectedStoreId}"]`
-          ) ||
-          document.querySelector(
-            `.store-item[data-id="${expectedStoreId}"]`
-          ) ||
-          document.querySelector(
-            `.fulfilment-store-item[data-store-id="${expectedStoreId}"]`
-          ) ||
-          document.querySelector(
-            `.fulfilment-store-item[data-id="${expectedStoreId}"]`
+            storeSelector
           );
 
-        if (
-          storeElement
-        ) {
+        if (storeElement) {
+          /*
+           * ------------------------------------------------------
+           * Store name
+           * ------------------------------------------------------
+           */
+
           store =
             cleanText(
               storeElement.getAttribute(
@@ -1518,107 +1660,113 @@ export class SupercheapAutoAdapter
 
           if (store) {
             diagnostics.storeSource =
-              'DOM:.store-item[data-store-id]';
+              `DOM:${storeSelector}`;
           }
 
           /*
-           * If the waiting step didn't resolve availability,
-           * perform a final direct extraction from data-products.
+           * ------------------------------------------------------
+           * 1. data-products
+           * ------------------------------------------------------
+           *
+           * This is the strongest product-specific signal.
            */
+
           const productsJson =
             storeElement.getAttribute(
               'data-products'
             );
 
-          let productsData:
-            StoreProductData | null =
-            null;
-
           if (
-            productsJson
+            productsJson &&
+            sku
           ) {
             try {
-              productsData =
+              const products =
                 JSON.parse(
                   productsJson
-                ) as StoreProductData;
+                ) as StoreProducts;
+
+              const available =
+                Array.isArray(
+                  products.available
+                )
+                  ? products.available
+                  : [];
+
+              const unavailable =
+                Array.isArray(
+                  products.unavailable
+                )
+                  ? products.unavailable
+                  : [];
+
+              const lowStock =
+                Array.isArray(
+                  products.lowStock
+                )
+                  ? products.lowStock
+                  : [];
+
+              if (
+                available.includes(
+                  sku
+                )
+              ) {
+                availability =
+                  'in_stock';
+
+                diagnostics.availabilitySource =
+                  'data-products.available';
+              } else if (
+                lowStock.includes(
+                  sku
+                )
+              ) {
+                /*
+                 * Low stock still means the item is in stock.
+                 */
+                availability =
+                  'in_stock';
+
+                diagnostics.availabilitySource =
+                  'data-products.lowStock';
+              } else if (
+                unavailable.includes(
+                  sku
+                )
+              ) {
+                availability =
+                  'out_of_stock';
+
+                diagnostics.availabilitySource =
+                  'data-products.unavailable';
+              }
             } catch {
-              productsData = null;
-            }
-          }
-
-          if (
-            sku &&
-            productsData
-          ) {
-            const available =
-              Array.isArray(
-                productsData.available
-              )
-                ? productsData.available
-                : [];
-
-            const unavailable =
-              Array.isArray(
-                productsData.unavailable
-              )
-                ? productsData.unavailable
-                : [];
-
-            const lowStock =
-              Array.isArray(
-                productsData.lowStock
-              )
-                ? productsData.lowStock
-                : [];
-
-            if (
-              available.includes(
-                sku
-              )
-            ) {
-              availability =
-                'in_stock';
-
-              diagnostics.availabilitySource =
-                'data-products.available';
-            } else if (
-              lowStock.includes(
-                sku
-              )
-            ) {
-              availability =
-                'in_stock';
-
-              diagnostics.availabilitySource =
-                'data-products.lowStock';
-            } else if (
-              unavailable.includes(
-                sku
-              )
-            ) {
-              availability =
-                'out_of_stock';
-
-              diagnostics.availabilitySource =
-                'data-products.unavailable';
+              /*
+               * Ignore malformed JSON.
+               */
             }
           }
 
           /*
-           * Fallback to data-status.
+           * ------------------------------------------------------
+           * 2. data-status
+           * ------------------------------------------------------
            */
+
           if (
             availability ===
             'unknown'
           ) {
-            const status =
-              storeElement.getAttribute(
-                'data-status'
+            const dataStatus =
+              cleanText(
+                storeElement.getAttribute(
+                  'data-status'
+                )
               );
 
             if (
-              status?.toLowerCase() ===
+              dataStatus?.toLowerCase() ===
               'available'
             ) {
               availability =
@@ -1627,71 +1775,125 @@ export class SupercheapAutoAdapter
               diagnostics.availabilitySource =
                 'data-status=available';
             } else if (
-              status?.toLowerCase() ===
+              dataStatus?.toLowerCase() ===
                 'unavailable' ||
-              status?.toLowerCase() ===
-                'out-of-stock' ||
-              status?.toLowerCase() ===
-                'out_of_stock'
+              dataStatus?.toLowerCase() ===
+                'out_of_stock' ||
+              dataStatus?.toLowerCase() ===
+                'out-of-stock'
             ) {
               availability =
                 'out_of_stock';
 
               diagnostics.availabilitySource =
-                `data-status=${status}`;
+                `data-status=${dataStatus}`;
             }
           }
 
           /*
-           * Final fallback to visible status text inside the
-           * exact configured store element.
+           * ------------------------------------------------------
+           * 3. Actual visible text
+           * ------------------------------------------------------
+           *
+           * Your supplied HTML:
+           *
+           * <span class="text-status pdp">
+           *     In Stock
+           * </span>
            */
+
           if (
             availability ===
             'unknown'
           ) {
+            const statusElement =
+              storeElement.querySelector(
+                '.text-status.pdp'
+              );
+
             const statusText =
               cleanText(
-                storeElement
-                  .querySelector(
-                    '.text-status.pdp'
-                  )
-                  ?.textContent
-              ) ||
-              cleanText(
-                storeElement
-                  .querySelector(
-                    '.store-status'
-                  )
+                statusElement
                   ?.textContent
               );
 
             if (
               /\bin\s+stock\b/i.test(
-                statusText || ''
+                statusText ||
+                  ''
               )
             ) {
               availability =
                 'in_stock';
 
               diagnostics.availabilitySource =
-                '.text-status.pdp';
+                'DOM:.store-item .text-status.pdp';
             } else if (
               /\bout\s+of\s+stock\b/i.test(
-                statusText || ''
+                statusText ||
+                  ''
               ) ||
               /\bunavailable\b/i.test(
-                statusText || ''
+                statusText ||
+                  ''
+              ) ||
+              /\bnot\s+available\b/i.test(
+                statusText ||
+                  ''
               )
             ) {
               availability =
                 'out_of_stock';
 
               diagnostics.availabilitySource =
-                '.text-status.pdp';
+                'DOM:.store-item .text-status.pdp';
+            }
+          }
+
+          /*
+           * ------------------------------------------------------
+           * 4. Generic store class fallback
+           * ------------------------------------------------------
+           */
+
+          if (
+            availability ===
+            'unknown'
+          ) {
+            const className =
+              storeElement.className ||
+              '';
+
+            if (
+              /\bavailable\b/i.test(
+                className
+              )
+            ) {
+              availability =
+                'in_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:.store-item.available';
             }
           }
         }
+
+        /*
+         * --------------------------------------------------------
+         * Final fallback:
+         *
+         * Do NOT use general page availability here.
+         *
+         * We specifically want availability for Wairau Park.
+         * --------------------------------------------------------
+         */
+
+        const canonicalUrl =
+          getAttribute(
+            'link[rel="canonical"]',
+            'href'
+          ) ||
+          window.location.href;
 
         return {
           name,
@@ -1701,32 +1903,28 @@ export class SupercheapAutoAdapter
           saleEndDate,
           availability,
           store,
-          canonicalUrl:
-            getAttribute(
-              'link[rel="canonical"]',
-              'href'
-            ) ||
-            window.location.href,
+          canonicalUrl,
           diagnostics,
         };
       },
       {
-        expectedStoreId:
-          this.storeId,
-        resolvedAvailability:
-          resolvedAvailability ??
-          'unknown',
+        expectedStoreId,
       }
     );
   }
 
-  /**
-   * Main scraping method.
+  /*
+   * ============================================================
+   * MAIN SCRAPER
+   * ============================================================
    */
+
   async scrapeProduct(
     url: string
   ): Promise<SupercheapAutoScrapedProduct> {
-    let page: Page | null = null;
+    let page:
+      | Page
+      | null = null;
 
     const startTime =
       Date.now();
@@ -1742,16 +1940,20 @@ export class SupercheapAutoAdapter
       );
 
       /*
-       * ============================================================
-       * STEP 1: PRODUCT PAGE
-       * ============================================================
+       * --------------------------------------------------------
+       * 1. Load product page
+       * --------------------------------------------------------
        */
 
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout:
-          this.navigationTimeout,
-      });
+      await page.goto(
+        url,
+        {
+          waitUntil:
+            'domcontentloaded',
+          timeout:
+            this.navigationTimeout,
+        }
+      );
 
       const productPageUrl =
         page.url();
@@ -1762,22 +1964,21 @@ export class SupercheapAutoAdapter
         )
       ) {
         throw new Error(
-          `Supercheap Auto URL resolved to search results: ` +
-            `${productPageUrl}`
+          `Supercheap Auto URL resolved to search results: ${productPageUrl}`
         );
       }
 
       /*
-       * Wait for the product page itself.
+       * Wait for actual product content.
        */
       await this.waitForProductPage(
         page
       );
 
       /*
-       * ============================================================
-       * STEP 2: STORE
-       * ============================================================
+       * --------------------------------------------------------
+       * 2. Select Wairau Park
+       * --------------------------------------------------------
        */
 
       await this.ensureStoreSelected(
@@ -1785,6 +1986,9 @@ export class SupercheapAutoAdapter
         productPageUrl
       );
 
+      /*
+       * Make absolutely sure we're still on product page.
+       */
       await this.restoreProductPage(
         page,
         productPageUrl
@@ -1796,48 +2000,46 @@ export class SupercheapAutoAdapter
       );
 
       /*
-       * ============================================================
-       * STEP 3: GET SKU
-       * ============================================================
+       * --------------------------------------------------------
+       * 3. Extract SKU first
+       * --------------------------------------------------------
        */
 
-      const skuForInventory =
-        await this.extractSkuForWaiting(
+      const sku =
+        await this.extractSku(
           page
         );
 
       logger.debug(
-        `Supercheap Auto SKU for inventory lookup: ${skuForInventory}`
+        `Supercheap Auto SKU detected: ${sku}`
       );
 
       /*
-       * ============================================================
-       * STEP 4: WAIT FOR INVENTORY
-       * ============================================================
+       * --------------------------------------------------------
+       * 4. Wait for Wairau Park inventory
+       * --------------------------------------------------------
        *
-       * This is the key difference from the previous performance
-       * refactor.
+       * This waits for the ACTUAL:
        *
-       * We wait for the actual SKU to appear in data-products,
-       * rather than merely waiting for the store element.
+       * .store-item[data-store-id="7030"]
+       *
+       * and its data-products/status.
        */
 
-      const resolvedAvailability =
-        await this.waitForStoreInventory(
-          page,
-          skuForInventory
-        );
+      await this.waitForInventory(
+        page,
+        sku
+      );
 
       /*
-       * ============================================================
-       * STEP 5: EXTRACT
-       * ============================================================
+       * --------------------------------------------------------
+       * 5. Extract everything
+       * --------------------------------------------------------
        */
 
       const product =
         await this.extractProduct(
-          page,
-          resolvedAvailability
+          page
         );
 
       const durationMs =
@@ -1845,8 +2047,10 @@ export class SupercheapAutoAdapter
         startTime;
 
       logger.info(
-        `Supercheap Auto completed in ${durationMs}ms: ` +
-          `${JSON.stringify({
+        `Supercheap Auto extraction result: ${JSON.stringify(
+          {
+            finalPageUrl:
+              page.url(),
             name:
               product.name,
             sku:
@@ -1855,20 +2059,25 @@ export class SupercheapAutoAdapter
               product.price,
             originalPrice:
               product.originalPrice,
+            saleEndDate:
+              product.saleEndDate,
             availability:
               product.availability,
             store:
               product.store,
             availabilitySource:
-              product.diagnostics
+              product
+                .diagnostics
                 .availabilitySource,
-          })}`
+            durationMs,
+          }
+        )}`
       );
 
       /*
-       * ============================================================
-       * WARNINGS
-       * ============================================================
+       * --------------------------------------------------------
+       * Diagnostics / warnings
+       * --------------------------------------------------------
        */
 
       if (!product.name) {
@@ -1884,7 +2093,8 @@ export class SupercheapAutoAdapter
       }
 
       if (
-        product.price === null
+        product.price ===
+        null
       ) {
         logger.warn(
           `Supercheap Auto price could not be extracted: ${url}`
@@ -1893,7 +2103,7 @@ export class SupercheapAutoAdapter
 
       if (!product.store) {
         logger.warn(
-          `Supercheap Auto store ${this.storeName} could not be confirmed.`
+          `Supercheap Auto could not confirm store ${this.storeName}: ${url}`
         );
       }
 
@@ -1902,15 +2112,16 @@ export class SupercheapAutoAdapter
         'unknown'
       ) {
         logger.warn(
-          `Supercheap Auto availability is unknown for ` +
-            `SKU ${product.sku} at ${this.storeName}.`
+          `Supercheap Auto availability is still unknown for ` +
+            `SKU ${product.sku}, store ${this.storeName}. ` +
+            `Source: ${product.diagnostics.availabilitySource}`
         );
       }
 
       /*
-       * ============================================================
-       * RETURN
-       * ============================================================
+       * --------------------------------------------------------
+       * Return
+       * --------------------------------------------------------
        */
 
       return {
