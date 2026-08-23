@@ -43,7 +43,16 @@ export interface SupercheapAutoScrapedProduct
   postalCode: string;
 }
 
+export interface WoolworthsScrapedProduct extends BaseScrapedProduct {
+  site: 'woolworths';
+  savings: number | null;
+  packageSize: string | null;
+  cupPrice: string | null;
+  store: string;
+}
+
 export type ScrapedProduct =
   | RepcoScrapedProduct
   | ChemistWarehouseScrapedProduct
-  | SupercheapAutoScrapedProduct;
+  | SupercheapAutoScrapedProduct
+  | WoolworthsScrapedProduct;
