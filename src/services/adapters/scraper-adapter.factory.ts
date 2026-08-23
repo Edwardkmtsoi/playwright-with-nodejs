@@ -31,6 +31,7 @@ const adapters: Record<
   repco: repcoAdapter,
   chemistwarehouse: chemistWarehouseAdapter,
   supercheapauto: supercheapAutoAdapter,
+  woolworths: woolworthsAdapter,
 };
 
 function normalizeSite(site: string): SupportedScrapeSite | null {
