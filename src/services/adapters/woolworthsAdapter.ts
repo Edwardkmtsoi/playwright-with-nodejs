@@ -1,4 +1,4 @@
-import { Page, Locator } from 'playwright';
+import { Page } from 'playwright';
 import logger from '../../config/logger';
 import { browserService } from '../browser.service';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
