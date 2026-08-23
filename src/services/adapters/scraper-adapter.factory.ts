@@ -4,7 +4,7 @@ import { ProductScraperAdapter } from './scraper-adapter.interface';
 import { repcoAdapter } from './repco.adapter';
 import { chemistWarehouseAdapter } from './chemistwarehouse.adapter';
 import { supercheapAutoAdapter } from './supercheapauto.adapter';
-import { woolworthsAdapter } from './woolworths.adapter';
+import { woolworthsAdapter } from './woolworthsAdapter';
 
 const siteAliases: Record<string, SupportedScrapeSite> = {
   repco: 'repco',
