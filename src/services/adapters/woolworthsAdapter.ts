@@ -39,833 +39,1729 @@ export class WoolworthsAdapter
 {
   readonly site = 'woolworths' as const;
 
-  private readonly storeName = 'Woolworths Birkenhead';
-  private readonly regionName = 'Auckland (North)';
-  private readonly regionValue = '600';
-
-  private readonly navigationTimeout = 60000;
-
-  /**
-   * Determine whether this adapter can handle the supplied URL.
+  /*
+   * ============================================================
+   * CONFIGURATION
+   * ============================================================
    */
+
+  private readonly storeName =
+    'Woolworths Birkenhead';
+
+  private readonly regionName =
+    'Auckland (North)';
+
+  private readonly regionValue =
+    '600';
+
+  private readonly navigationTimeout =
+    60000;
+
+  private readonly storeSelectionTimeout =
+    20000;
+
+  /*
+   * ============================================================
+   * URL
+   * ============================================================
+   */
+
   canHandle(url: string): boolean {
     try {
-      const parsedUrl = new URL(url);
-      const hostname = parsedUrl.hostname.toLowerCase();
+      const parsedUrl =
+        new URL(url);
+
+      const hostname =
+        parsedUrl.hostname.toLowerCase();
 
       return (
-        hostname === 'woolworths.co.nz' ||
-        hostname.endsWith('.woolworths.co.nz')
+        hostname ===
+          'woolworths.co.nz' ||
+        hostname.endsWith(
+          '.woolworths.co.nz'
+        )
       );
     } catch {
       return false;
     }
   }
 
-  /**
-   * PERFORMANCE / FAST PATH:
-   *
-   * Woolworths shows the currently-selected store directly on the
-   * product page via the "how/where/when" banner:
-   *
-   *   You're seeing information for the <strong>Birkenhead store</strong>.
-   *
-   * If this already says Birkenhead, the store selection from a
-   * previous scrape (persisted via storageState) is still active,
-   * and we can skip the entire click-through flow.
+  /*
+   * ============================================================
+   * HELPERS
+   * ============================================================
    */
-  private async isStoreAlreadyConfigured(
-    page: Page
-  ): Promise<boolean> {
-    const banner = page
-      .locator('global-nav-how-where-when-bar .information-message')
-      .first();
 
-    const text = await banner
-      .textContent({ timeout: 5000 })
-      .catch(() => null);
+  private cleanText(
+    value:
+      | string
+      | null
+      | undefined
+  ): string | null {
+    if (!value) {
+      return null;
+    }
 
-    const cleaned = text?.replace(/\s+/g, ' ').trim() || '';
+    const cleaned =
+      value
+        .replace(
+          /\u00a0/g,
+          ' '
+        )
+        .replace(
+          /\s+/g,
+          ' '
+        )
+        .trim();
 
-    const isConfigured = new RegExp(
-      `${this.escapeRegExp(this.storeShortName())}\\s+store`,
-      'i'
-    ).test(cleaned);
+    return cleaned || null;
+  }
 
-    logger.debug(
-      `Woolworths fast-path store check: ` +
-        `${isConfigured ? 'already configured' : 'not configured'} ` +
-        `(banner text: "${cleaned}")`
+  private escapeRegExp(
+    value: string
+  ): string {
+    return value.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      '\\$&'
     );
-
-    return isConfigured;
   }
 
   private storeShortName(): string {
-    // "Woolworths Birkenhead" -> "Birkenhead"
-    return this.storeName.replace(/^Woolworths\s+/i, '').trim();
-  }
-
-  private escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  /**
-   * Click the "Change location" link on the product page to open
-   * the store/fulfilment selector.
-   */
-  private async openChangeLocation(page: Page): Promise<void> {
-    const changeLocationLink = page
-      .locator(
-        [
-          'a.actionButtonLink[aria-label="Change location"]',
-          'a:has-text("Change location")',
-        ].join(', ')
+    return this.storeName
+      .replace(
+        /^Woolworths\s+/i,
+        ''
       )
-      .first();
-
-    await changeLocationLink.waitFor({
-      state: 'visible',
-      timeout: 15000,
-    });
-
-    logger.debug('Clicking Woolworths "Change location" link');
-
-    await changeLocationLink.click({ timeout: 10000 });
+      .trim();
   }
 
-  /**
-   * Select the "Pick up" fulfilment method tile.
+  /*
+   * ============================================================
+   * FAST STORE CHECK
+   * ============================================================
+   *
+   * Woolworths displays the selected store in:
+   *
+   * global-nav-how-where-when-bar
+   *
+   * If Birkenhead is already selected, don't open the selector.
+   *
+   * This is particularly important because browserService now
+   * persists the Woolworths context between separate n8n calls.
    */
-  private async selectPickup(page: Page): Promise<void> {
-    const pickupTile = page
-      .locator(
-        [
-          'form-selection-tile[data-cy="selectionTilePickup"]',
-          'label[for="method-pickup"]',
-          'input#method-pickup',
-        ].join(', ')
-      )
-      .first();
 
-    await pickupTile.waitFor({
-      state: 'visible',
-      timeout: 15000,
-    });
+  private async isStoreAlreadyConfigured(
+    page: Page
+  ): Promise<boolean> {
+    const banner =
+      page
+        .locator(
+          'global-nav-how-where-when-bar .information-message'
+        )
+        .first();
 
-    logger.debug('Selecting Woolworths "Pick up" method');
+    const text =
+      await banner
+        .textContent({
+          timeout: 3000,
+        })
+        .catch(
+          () => null
+        );
 
-    await pickupTile.click({ timeout: 10000 });
+    const cleaned =
+      this.cleanText(text) ||
+      '';
+
+    const configured =
+      new RegExp(
+        `${this.escapeRegExp(
+          this.storeShortName()
+        )}\\s+store`,
+        'i'
+      ).test(
+        cleaned
+      );
+
+    logger.debug(
+      `Woolworths store check: ${
+        configured
+          ? 'configured'
+          : 'not configured'
+      }; banner="${cleaned}"`
+    );
+
+    return configured;
   }
 
-  /**
-   * Click the "Change store" link to open the store list/region
-   * picker.
+  /*
+   * ============================================================
+   * STORE SELECTION
+   * ============================================================
    */
-  private async openChangeStore(page: Page): Promise<void> {
-    const changeStoreButton = page
-      .locator(
-        'button[data-cy="link"]:has-text("Change store")'
-      )
-      .first();
 
-    await changeStoreButton.waitFor({
+  private async openChangeLocation(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      [
+        'a.actionButtonLink[aria-label="Change location"]',
+        'a:has-text("Change location")',
+        'button:has-text("Change location")',
+      ].join(', ');
+
+    const button =
+      page
+        .locator(selector)
+        .first();
+
+    await button.waitFor({
       state: 'visible',
-      timeout: 15000,
-    });
-
-    logger.debug('Clicking Woolworths "Change store" button');
-
-    await changeStoreButton.click({ timeout: 10000 });
-  }
-
-  /**
-   * Select the configured region ("Auckland (North)") from the
-   * region dropdown.
-   */
-  private async selectRegion(page: Page): Promise<void> {
-    const regionSelect = page
-      .locator(
-        'select#area-dropdown-1, select[name="area-dropdown-1"]'
-      )
-      .first();
-
-    await regionSelect.waitFor({
-      state: 'visible',
-      timeout: 15000,
+      timeout:
+        this.storeSelectionTimeout,
     });
 
     logger.debug(
-      `Selecting Woolworths region "${this.regionName}"`
+      'Woolworths: clicking Change location'
+    );
+
+    await button.click({
+      timeout: 10000,
+    });
+  }
+
+  private async selectPickup(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      [
+        'form-selection-tile[data-cy="selectionTilePickup"]',
+        'label[for="method-pickup"]',
+        '#method-pickup',
+      ].join(', ');
+
+    const pickup =
+      page
+        .locator(selector)
+        .first();
+
+    await pickup.waitFor({
+      state: 'visible',
+      timeout:
+        this.storeSelectionTimeout,
+    });
+
+    logger.debug(
+      'Woolworths: selecting Pick up'
+    );
+
+    await pickup.click({
+      timeout: 10000,
+    });
+  }
+
+  private async openChangeStore(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      [
+        'button[data-cy="link"]:has-text("Change store")',
+        'button:has-text("Change store")',
+        'a:has-text("Change store")',
+      ].join(', ');
+
+    const button =
+      page
+        .locator(selector)
+        .first();
+
+    await button.waitFor({
+      state: 'visible',
+      timeout:
+        this.storeSelectionTimeout,
+    });
+
+    logger.debug(
+      'Woolworths: clicking Change store'
+    );
+
+    await button.click({
+      timeout: 10000,
+    });
+  }
+
+  private async selectRegion(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      [
+        'select#area-dropdown-1',
+        'select[name="area-dropdown-1"]',
+        'select[id*="area-dropdown"]',
+      ].join(', ');
+
+    const region =
+      page
+        .locator(selector)
+        .first();
+
+    await region.waitFor({
+      state: 'visible',
+      timeout:
+        this.storeSelectionTimeout,
+    });
+
+    logger.debug(
+      `Woolworths: selecting region ${this.regionName}`
     );
 
     try {
-      await regionSelect.selectOption({
-        value: this.regionValue,
+      await region.selectOption({
+        value:
+          this.regionValue,
       });
     } catch {
-      /*
-       * Fall back to matching by visible label text in case the
-       * option value ever changes.
-       */
-      await regionSelect.selectOption({
-        label: this.regionName,
+      logger.debug(
+        `Woolworths region value "${this.regionValue}" ` +
+          `not found; falling back to label`
+      );
+
+      await region.selectOption({
+        label:
+          this.regionName,
       });
     }
+
+    /*
+     * Give React/the page a very short opportunity to update
+     * the store list after changing the region.
+     */
+    await page
+      .waitForTimeout(300);
   }
 
-  /**
-   * Within the resulting store list, select "Woolworths Birkenhead"
-   * — or, if it's already selected (aria-disabled="true" with a
-   * tick icon), skip clicking it.
-   */
-  private async selectStore(page: Page): Promise<void> {
-    const storeList = page.locator(
-      'fulfilment-address-selector .addressList'
-    );
+  private async selectStore(
+    page: Page
+  ): Promise<void> {
+    const storeList =
+      page.locator(
+        'fulfilment-address-selector .addressList'
+      );
 
     await storeList.waitFor({
       state: 'visible',
-      timeout: 20000,
+      timeout:
+        this.storeSelectionTimeout,
     });
 
-    const storeButton = page
-      .locator('fulfilment-address-selector .addressList-item')
-      .filter({
-        has: page.locator(
-          `.addressList-title:text-is("${this.storeName}")`
-        ),
-      })
-      .locator('button.addressList-button')
-      .first();
+    /*
+     * Primary selector.
+     */
+    let storeItem =
+      page
+        .locator(
+          'fulfilment-address-selector .addressList-item'
+        )
+        .filter({
+          hasText:
+            this.storeName,
+        })
+        .first();
+
+    let visible =
+      await storeItem
+        .isVisible({
+          timeout: 5000,
+        })
+        .catch(
+          () => false
+        );
+
+    /*
+     * Fallback if the exact text filtering doesn't work because
+     * Woolworths changes the markup slightly.
+     */
+    if (!visible) {
+      storeItem =
+        page
+          .locator(
+            'fulfilment-address-selector .addressList-item'
+          )
+          .filter({
+            has: page.locator(
+              `.addressList-title:has-text("${this.storeName}")`
+            ),
+          })
+          .first();
+
+      visible =
+        await storeItem
+          .isVisible({
+            timeout: 5000,
+          })
+          .catch(
+            () => false
+          );
+    }
+
+    if (!visible) {
+      throw new Error(
+        `Woolworths store "${this.storeName}" ` +
+          `could not be found in the store list`
+      );
+    }
+
+    const storeButton =
+      storeItem
+        .locator(
+          'button.addressList-button'
+        )
+        .first();
 
     await storeButton.waitFor({
       state: 'visible',
-      timeout: 15000,
+      timeout: 10000,
     });
 
-    const ariaDisabled = await storeButton.getAttribute(
-      'aria-disabled'
-    );
-
-    if (ariaDisabled === 'true') {
-      logger.debug(
-        `Woolworths store "${this.storeName}" already selected ` +
-          `(aria-disabled=true); skipping click`
+    const ariaDisabled =
+      await storeButton.getAttribute(
+        'aria-disabled'
       );
+
+    if (
+      ariaDisabled ===
+      'true'
+    ) {
+      logger.debug(
+        `Woolworths ${this.storeName} ` +
+          `is already selected`
+      );
+
       return;
     }
 
-    logger.debug(`Clicking Woolworths store "${this.storeName}"`);
+    logger.debug(
+      `Woolworths: selecting ${this.storeName}`
+    );
 
-    await storeButton.scrollIntoViewIfNeeded();
-    await storeButton.click({ timeout: 10000 });
+    await storeButton
+      .scrollIntoViewIfNeeded();
+
+    await storeButton.click({
+      timeout: 10000,
+    });
   }
 
-  /**
-   * Click "Keep shopping" to confirm the selection and return to
-   * the product page.
-   */
-  private async confirmKeepShopping(page: Page): Promise<void> {
-    const keepShoppingButton = page
-      .locator(
-        [
-          'button.actionBar-keepShoppingButton',
-          'button:has-text("Keep shopping")',
-        ].join(', ')
-      )
-      .first();
+  private async confirmKeepShopping(
+    page: Page
+  ): Promise<void> {
+    const selector =
+      [
+        'button.actionBar-keepShoppingButton',
+        'button:has-text("Keep shopping")',
+      ].join(', ');
 
-    const visible = await keepShoppingButton
-      .isVisible({ timeout: 10000 })
-      .catch(() => false);
+    const button =
+      page
+        .locator(selector)
+        .first();
+
+    const visible =
+      await button
+        .isVisible({
+          timeout: 5000,
+        })
+        .catch(
+          () => false
+        );
 
     if (!visible) {
       logger.debug(
-        'No visible "Keep shopping" button found; ' +
-          'assuming selector closed automatically'
+        'Woolworths: no Keep shopping button; ' +
+          'assuming store selector closed automatically'
       );
+
       return;
     }
 
-    logger.debug('Clicking Woolworths "Keep shopping" button');
+    logger.debug(
+      'Woolworths: clicking Keep shopping'
+    );
 
-    await keepShoppingButton.click({ timeout: 10000 });
-  }
-
-  /**
-   * Run the full store-selection flow: Change location -> Pick up
-   * -> Change store -> region -> store -> Keep shopping.
-   */
-  private async ensureStoreSelected(page: Page): Promise<void> {
-    try {
-      logger.info(
-        `Selecting Woolworths store ${this.storeName} ` +
-          `in region ${this.regionName}`
-      );
-
-      await this.openChangeLocation(page);
-      await this.selectPickup(page);
-      await this.openChangeStore(page);
-      await this.selectRegion(page);
-      await this.selectStore(page);
-      await this.confirmKeepShopping(page);
-
-      /*
-       * Allow the page to refresh product/price data for the new
-       * store.
-       */
-      await page.waitForTimeout(1500);
-
-      /*
-       * PERSISTENCE: Save this context's cookies/localStorage now
-       * that Birkenhead is confirmed. Future Woolworths scrapes
-       * (any product URL) will restore this state and can skip
-       * this entire flow via the fast-path check.
-       */
-      await browserService.persistStorageState('woolworths');
-
-      logger.info(
-        `Woolworths store selection completed for ${this.storeName}`
-      );
-    } catch (error) {
-      logger.warn(
-        `Woolworths store selection failed for ${this.storeName}. ` +
-          `Product extraction will continue, but price/availability ` +
-          `may reflect the wrong store: ` +
-          `${
-            error instanceof Error
-              ? error.message
-              : String(error)
-          }`
-      );
-    }
-  }
-
-  /**
-   * Extract product information from the current page.
-   */
-  private async extractProduct(page: Page): Promise<ExtractedProduct> {
-    return page.evaluate((): ExtractedProduct => {
-      const cleanText = (
-        value: string | null | undefined
-      ): string | null => {
-        if (!value) {
-          return null;
-        }
-
-        const cleaned = value
-          .replace(/\u00a0/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        return cleaned || null;
-      };
-
-      const parseMoney = (
-        value: string | null | undefined
-      ): number | null => {
-        if (!value) {
-          return null;
-        }
-
-        const match = value
-          .replace(/\u00a0/g, ' ')
-          .replace(/,/g, '')
-          .match(/(\d+(?:\.\d{1,2})?)/);
-
-        if (!match) {
-          return null;
-        }
-
-        const parsed = Number(match[1]);
-
-        return Number.isFinite(parsed) ? parsed : null;
-      };
-
-      const diagnostics: ExtractionDiagnostics = {
-        nameSource: null,
-        skuSource: null,
-        priceSource: null,
-        originalPriceSource: null,
-        savingsSource: null,
-        packageSizeSource: null,
-        cupPriceSource: null,
-        availabilitySource: null,
-      };
-
-      /*
-       * ==============================================================
-       * PRODUCT NAME
-       * ==============================================================
-       */
-
-      let name: string | null = null;
-
-      const nameEl = document.querySelector('h1.product-title');
-
-      if (nameEl) {
-        name = cleanText(nameEl.textContent);
-        diagnostics.nameSource = 'DOM:h1.product-title';
-      }
-
-      if (!name) {
-        const title = cleanText(document.title);
-
-        if (title) {
-          name = title
-            .replace(/\s*\|\s*Woolworths\s*$/i, '')
-            .trim();
-
-          diagnostics.nameSource = 'document.title';
-        }
-      }
-
-      /*
-       * ==============================================================
-       * SKU
-       * ==============================================================
-       *
-       * Derived from element ids following the pattern:
-       *
-       *   product-724632-top-price
-       *
-       * which embeds the numeric product id.
-       */
-
-      let sku: string | null = null;
-
-      const idCarrier = document.querySelector(
-        '[id^="product-"][id$="-top-price"]'
-      );
-
-      if (idCarrier) {
-        const idMatch = idCarrier.id.match(
-          /^product-(\d+)-top-price$/
-        );
-
-        if (idMatch) {
-          sku = idMatch[1];
-          diagnostics.skuSource = 'DOM:id=product-{id}-top-price';
-        }
-      }
-
-      /*
-       * ==============================================================
-       * CURRENT PRICE
-       * ==============================================================
-       *
-       * Prefer the aria-label ("$26.89 each.") since it's a single
-       * clean decimal value; the visible markup splits the price
-       * across <em> (dollars) and a trailing span (cents).
-       */
-
-      let price: number | null = null;
-
-      const priceEl = document.querySelector(
-        '.presentPrice, [id$="-top-price"]'
-      );
-
-      if (priceEl) {
-        const ariaPrice = priceEl.getAttribute('aria-label');
-
-        const fromAria = parseMoney(ariaPrice);
-
-        if (fromAria !== null) {
-          price = fromAria;
-          diagnostics.priceSource = 'ATTR:.presentPrice[aria-label]';
-        } else {
-          const fromText = parseMoney(priceEl.textContent);
-
-          if (fromText !== null) {
-            price = fromText;
-            diagnostics.priceSource = 'DOM:.presentPrice text';
-          }
-        }
-      }
-
-      /*
-       * ==============================================================
-       * ORIGINAL ("WAS") PRICE
-       * ==============================================================
-       */
-
-      let originalPrice: number | null = null;
-
-      const wasEl = document.querySelector(
-        '.price--was, [aria-label^="Was" i]'
-      );
-
-      if (wasEl) {
-        /*
-         * Prefer the visible text ("Was 46.00") over the aria-label,
-         * since the aria-label in the supplied markup is oddly
-         * formatted ("Was 46$") while the text content is a clean
-         * decimal.
-         */
-        const fromText = parseMoney(wasEl.textContent);
-
-        if (fromText !== null) {
-          originalPrice = fromText;
-          diagnostics.originalPriceSource = 'DOM:.price--was text';
-        } else {
-          const fromAria = parseMoney(
-            wasEl.getAttribute('aria-label')
-          );
-
-          if (fromAria !== null) {
-            originalPrice = fromAria;
-            diagnostics.originalPriceSource =
-              'ATTR:.price--was[aria-label]';
-          }
-        }
-      }
-
-      /*
-       * ==============================================================
-       * SAVINGS
-       * ==============================================================
-       */
-
-      let savings: number | null = null;
-
-      const saveEl = document.querySelector(
-        '.price--save, [aria-label^="Save" i]'
-      );
-
-      if (saveEl) {
-        const fromText = parseMoney(saveEl.textContent);
-
-        if (fromText !== null) {
-          savings = fromText;
-          diagnostics.savingsSource = 'DOM:.price--save text';
-        } else {
-          const fromAria = parseMoney(
-            saveEl.getAttribute('aria-label')
-          );
-
-          if (fromAria !== null) {
-            savings = fromAria;
-            diagnostics.savingsSource =
-              'ATTR:.price--save[aria-label]';
-          }
-        }
-      }
-
-      /*
-       * ==============================================================
-       * PACKAGE SIZE / CUP PRICE (extra fields)
-       * ==============================================================
-       */
-
-      let packageSize: string | null = null;
-
-      const sizeEl = document.querySelector(
-        'product-price-meta .size'
-      );
-
-      if (sizeEl) {
-        packageSize = cleanText(sizeEl.textContent);
-        diagnostics.packageSizeSource = 'DOM:product-price-meta .size';
-      }
-
-      let cupPrice: string | null = null;
-
-      const cupPriceEl = document.querySelector(
-        'product-price-meta .cupPrice'
-      );
-
-      if (cupPriceEl) {
-        cupPrice = cleanText(cupPriceEl.textContent);
-        diagnostics.cupPriceSource =
-          'DOM:product-price-meta .cupPrice';
-      }
-
-      /*
-       * ==============================================================
-       * AVAILABILITY
-       * ==============================================================
-       *
-       * No explicit stock badge was present in the supplied markup.
-       * Best-effort: look for an "Add to trolley" control and infer
-       * from its presence/disabled state, with a text-based fallback
-       * for common out-of-stock phrasing.
-       */
-
-      let availability: Availability = 'unknown';
-
-      const bodyText =
-        cleanText(document.body?.innerText) || '';
-
-      if (
-        /\bout of stock\b/i.test(bodyText) ||
-        /\bcurrently unavailable\b/i.test(bodyText) ||
-        /\btemporarily unavailable\b/i.test(bodyText)
-      ) {
-        availability = 'out_of_stock';
-        diagnostics.availabilitySource = 'TEXT:out-of-stock phrase';
-      } else {
-        const addToTrolleyButton = document.querySelector(
-          '[data-cy="addToTrolleyBtn"]'
-        );
-
-        if (addToTrolleyButton) {
-          const ariaDisabled = addToTrolleyButton.getAttribute(
-            'aria-disabled'
-          );
-
-          if (ariaDisabled === 'true') {
-            availability = 'out_of_stock';
-            diagnostics.availabilitySource =
-              'DOM:addToTrolleyBtn[aria-disabled=true]';
-          } else {
-            availability = 'in_stock';
-            diagnostics.availabilitySource =
-              'DOM:addToTrolleyBtn present';
-          }
-        }
-      }
-
-      /*
-       * ==============================================================
-       * CANONICAL URL
-       * ==============================================================
-       */
-
-      const canonicalEl = document.querySelector(
-        'link[rel="canonical"]'
-      );
-
-      const canonicalUrl =
-        cleanText(canonicalEl?.getAttribute('href')) ||
-        window.location.href;
-
-      return {
-        name,
-        sku,
-        price,
-        originalPrice,
-        savings,
-        packageSize,
-        cupPrice,
-        availability,
-        canonicalUrl,
-        diagnostics,
-      };
+    await button.click({
+      timeout: 10000,
     });
   }
 
-  /**
-   * Confirm the store banner reflects Birkenhead. Used after
-   * extraction to flag (not throw) if something is off, since price
-   * data may still be usable even if the banner check is uncertain.
+  /*
+   * ============================================================
+   * FULL STORE SELECTION
+   * ============================================================
    */
-  private async validateConfiguredStore(page: Page): Promise<void> {
-    const banner = page
-      .locator('global-nav-how-where-when-bar .information-message')
-      .first();
 
-    const text = await banner
-      .textContent({ timeout: 5000 })
-      .catch(() => null);
-
-    const cleaned = text?.replace(/\s+/g, ' ').trim() || null;
-
-    if (
-      cleaned &&
-      !new RegExp(
-        `${this.escapeRegExp(this.storeShortName())}\\s+store`,
-        'i'
-      ).test(cleaned)
-    ) {
-      logger.warn(
-        `Woolworths banner does not confirm ${this.storeName}: ` +
-          `"${cleaned}"`
+  private async ensureStoreSelected(
+    page: Page
+  ): Promise<boolean> {
+    try {
+      logger.info(
+        `Woolworths: selecting ${this.storeName} ` +
+          `(${this.regionName})`
       );
+
+      await this.openChangeLocation(
+        page
+      );
+
+      await this.selectPickup(
+        page
+      );
+
+      await this.openChangeStore(
+        page
+      );
+
+      await this.selectRegion(
+        page
+      );
+
+      await this.selectStore(
+        page
+      );
+
+      await this.confirmKeepShopping(
+        page
+      );
+
+      /*
+       * Wait for the store banner rather than networkidle.
+       *
+       * Woolworths is an AJAX/React-style site and networkidle
+       * is unnecessary here.
+       */
+      const configured =
+        await this.waitForStoreBanner(
+          page,
+          10000
+        );
+
+      if (!configured) {
+        logger.warn(
+          `Woolworths store selection completed but ` +
+            `the page did not confirm ${this.storeName}`
+        );
+
+        return false;
+      }
+
+      /*
+       * Persist cookies/localStorage.
+       *
+       * BrowserService now has a persistent per-site context,
+       * so subsequent n8n calls can skip this whole flow.
+       */
+      await browserService
+        .persistStorageState(
+          'woolworths'
+        );
+
+      logger.info(
+        `Woolworths store ${this.storeName} ` +
+          `selected and storage state persisted`
+      );
+
+      return true;
+    } catch (error) {
+      logger.error(
+        `Woolworths store selection failed:`,
+        error
+      );
+
+      return false;
     }
   }
 
-  /**
-   * Main scraping method.
+  /*
+   * ============================================================
+   * WAIT FOR STORE BANNER
+   * ============================================================
    */
+
+  private async waitForStoreBanner(
+    page: Page,
+    timeout: number
+  ): Promise<boolean> {
+    try {
+      await page.waitForFunction(
+        ({
+          storeShortName,
+        }) => {
+          const element =
+            document.querySelector(
+              'global-nav-how-where-when-bar .information-message'
+            );
+
+          const text =
+            element
+              ?.textContent
+              ?.replace(
+                /\s+/g,
+                ' '
+              )
+              .trim() || '';
+
+          const escaped =
+            storeShortName.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              '\\$&'
+            );
+
+          return new RegExp(
+            `${escaped}\\s+store`,
+            'i'
+          ).test(text);
+        },
+        {
+          storeShortName:
+            this.storeShortName(),
+        },
+        {
+          timeout,
+          polling: 200,
+        }
+      );
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /*
+   * ============================================================
+   * PRODUCT EXTRACTION
+   * ============================================================
+   */
+
+  private async extractProduct(
+    page: Page
+  ): Promise<ExtractedProduct> {
+    return page.evaluate(
+      (): ExtractedProduct => {
+        const cleanText =
+          (
+            value:
+              | string
+              | null
+              | undefined
+          ): string | null => {
+            if (!value) {
+              return null;
+            }
+
+            const cleaned =
+              value
+                .replace(
+                  /\u00a0/g,
+                  ' '
+                )
+                .replace(
+                  /\s+/g,
+                  ' '
+                )
+                .trim();
+
+            return cleaned || null;
+          };
+
+        const parseMoney =
+          (
+            value:
+              | string
+              | null
+              | undefined
+          ): number | null => {
+            if (!value) {
+              return null;
+            }
+
+            const cleaned =
+              value
+                .replace(
+                  /\u00a0/g,
+                  ' '
+                )
+                .replace(
+                  /,/g,
+                  ''
+                );
+
+            /*
+             * Woolworths sometimes uses:
+             *
+             * "$26.89 each"
+             * "26.89"
+             * "Was 46.00"
+             * "Was 46$"
+             */
+            const match =
+              cleaned.match(
+                /(\d+(?:\.\d{1,2})?)/
+              );
+
+            if (!match) {
+              return null;
+            }
+
+            const valueNumber =
+              Number(
+                match[1]
+              );
+
+            return Number.isFinite(
+              valueNumber
+            )
+              ? valueNumber
+              : null;
+          };
+
+        const getText =
+          (
+            selector: string
+          ): string | null => {
+            const element =
+              document.querySelector(
+                selector
+              );
+
+            return cleanText(
+              element?.textContent
+            );
+          };
+
+        const getAttribute =
+          (
+            selector: string,
+            attribute: string
+          ): string | null => {
+            const element =
+              document.querySelector(
+                selector
+              );
+
+            return cleanText(
+              element?.getAttribute(
+                attribute
+              )
+            );
+          };
+
+        const diagnostics:
+          ExtractionDiagnostics = {
+          nameSource: null,
+          skuSource: null,
+          priceSource: null,
+          originalPriceSource:
+            null,
+          savingsSource: null,
+          packageSizeSource:
+            null,
+          cupPriceSource: null,
+          availabilitySource:
+            null,
+        };
+
+        /*
+         * ========================================================
+         * NAME
+         * ========================================================
+         */
+
+        let name:
+          string | null = null;
+
+        const nameSelectors =
+          [
+            'h1.product-title',
+            'h1[itemprop="name"]',
+            '[itemprop="name"]',
+            'h1[class*="product-title" i]',
+            'h1[class*="product-name" i]',
+            'h1',
+          ];
+
+        for (
+          const selector of
+            nameSelectors
+        ) {
+          const value =
+            getText(
+              selector
+            );
+
+          if (value) {
+            name =
+              value;
+
+            diagnostics.nameSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+        }
+
+        if (!name) {
+          const title =
+            cleanText(
+              document.title
+            );
+
+          if (title) {
+            name =
+              title
+                .replace(
+                  /\s*\|\s*Woolworths\s*$/i,
+                  ''
+                )
+                .trim();
+
+            diagnostics.nameSource =
+              'document.title';
+          }
+        }
+
+        /*
+         * ========================================================
+         * SKU
+         * ========================================================
+         *
+         * Existing Woolworths markup uses:
+         *
+         * product-724632-top-price
+         *
+         * Therefore 724632 is the SKU/product ID.
+         */
+
+        let sku:
+          string | null = null;
+
+        const idCarrier =
+          document.querySelector(
+            '[id^="product-"][id$="-top-price"]'
+          );
+
+        if (idCarrier) {
+          const match =
+            idCarrier.id.match(
+              /^product-(\d+)-top-price$/
+            );
+
+          if (match) {
+            sku =
+              match[1];
+
+            diagnostics.skuSource =
+              'DOM:id=product-{id}-top-price';
+          }
+        }
+
+        /*
+         * Fallback: any product-{number} element.
+         */
+        if (!sku) {
+          const elements =
+            Array.from(
+              document.querySelectorAll(
+                '[id^="product-"]'
+              )
+            );
+
+          for (
+            const element of
+              elements
+          ) {
+            const match =
+              element.id.match(
+                /^product-(\d+)/
+              );
+
+            if (match) {
+              sku =
+                match[1];
+
+              diagnostics.skuSource =
+                'DOM:id=product-{id}';
+
+              break;
+            }
+          }
+        }
+
+        /*
+         * ========================================================
+         * CURRENT PRICE
+         * ========================================================
+         */
+
+        let price:
+          number | null = null;
+
+        const priceSelectors =
+          [
+            '.presentPrice',
+            '[id$="-top-price"]',
+            '[class*="presentPrice" i]',
+          ];
+
+        for (
+          const selector of
+            priceSelectors
+        ) {
+          const element =
+            document.querySelector(
+              selector
+            );
+
+          if (!element) {
+            continue;
+          }
+
+          const ariaPrice =
+            element.getAttribute(
+              'aria-label'
+            );
+
+          const fromAria =
+            parseMoney(
+              ariaPrice
+            );
+
+          if (
+            fromAria !==
+            null
+          ) {
+            price =
+              fromAria;
+
+            diagnostics.priceSource =
+              `ATTR:${selector}[aria-label]`;
+
+            break;
+          }
+
+          const fromText =
+            parseMoney(
+              element.textContent
+            );
+
+          if (
+            fromText !==
+            null
+          ) {
+            price =
+              fromText;
+
+            diagnostics.priceSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+        }
+
+        /*
+         * ========================================================
+         * ORIGINAL PRICE
+         * ========================================================
+         */
+
+        let originalPrice:
+          number | null = null;
+
+        const wasSelectors =
+          [
+            '.price--was',
+            '[aria-label^="Was" i]',
+            '[class*="price--was" i]',
+            '[class*="was-price" i]',
+          ];
+
+        for (
+          const selector of
+            wasSelectors
+        ) {
+          const element =
+            document.querySelector(
+              selector
+            );
+
+          if (!element) {
+            continue;
+          }
+
+          const fromText =
+            parseMoney(
+              element.textContent
+            );
+
+          if (
+            fromText !==
+              null &&
+            (
+              price ===
+                null ||
+              fromText >
+                price
+            )
+          ) {
+            originalPrice =
+              fromText;
+
+            diagnostics.originalPriceSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+
+          const fromAria =
+            parseMoney(
+              element.getAttribute(
+                'aria-label'
+              )
+            );
+
+          if (
+            fromAria !==
+              null &&
+            (
+              price ===
+                null ||
+              fromAria >
+                price
+            )
+          ) {
+            originalPrice =
+              fromAria;
+
+            diagnostics.originalPriceSource =
+              `ATTR:${selector}[aria-label]`;
+
+            break;
+          }
+        }
+
+        /*
+         * Text fallback:
+         *
+         * Was 46.00
+         */
+        if (
+          originalPrice ===
+          null
+        ) {
+          const bodyText =
+            cleanText(
+              document.body
+                ?.innerText
+            ) || '';
+
+          const match =
+            bodyText.match(
+              /\bWas\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i
+            );
+
+          if (match) {
+            const candidate =
+              parseMoney(
+                match[1]
+              );
+
+            if (
+              candidate !==
+                null &&
+              (
+                price ===
+                  null ||
+                candidate >
+                  price
+              )
+            ) {
+              originalPrice =
+                candidate;
+
+              diagnostics.originalPriceSource =
+                'TEXT:Was';
+            }
+          }
+        }
+
+        /*
+         * ========================================================
+         * SAVINGS
+         * ========================================================
+         */
+
+        let savings:
+          number | null = null;
+
+        const saveSelectors =
+          [
+            '.price--save',
+            '[aria-label^="Save" i]',
+            '[class*="price--save" i]',
+            '[class*="save-price" i]',
+          ];
+
+        for (
+          const selector of
+            saveSelectors
+        ) {
+          const element =
+            document.querySelector(
+              selector
+            );
+
+          if (!element) {
+            continue;
+          }
+
+          const value =
+            parseMoney(
+              element.textContent
+            ) ??
+            parseMoney(
+              element.getAttribute(
+                'aria-label'
+              )
+            );
+
+          if (
+            value !== null
+          ) {
+            savings =
+              value;
+
+            diagnostics.savingsSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+        }
+
+        /*
+         * If Woolworths doesn't expose savings directly,
+         * calculate it from original - current price.
+         */
+        if (
+          savings ===
+            null &&
+          originalPrice !==
+            null &&
+          price !== null &&
+          originalPrice >
+            price
+        ) {
+          savings =
+            Number(
+              (
+                originalPrice -
+                price
+              ).toFixed(2)
+            );
+
+          diagnostics.savingsSource =
+            'CALCULATED:originalPrice-price';
+        }
+
+        /*
+         * ========================================================
+         * PACKAGE SIZE
+         * ========================================================
+         */
+
+        let packageSize:
+          string | null = null;
+
+        const sizeSelectors =
+          [
+            'product-price-meta .size',
+            'product-price-meta [class*="size" i]',
+            '[class*="product-size" i]',
+            '[class*="package-size" i]',
+          ];
+
+        for (
+          const selector of
+            sizeSelectors
+        ) {
+          const value =
+            getText(
+              selector
+            );
+
+          if (value) {
+            packageSize =
+              value;
+
+            diagnostics.packageSizeSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+        }
+
+        /*
+         * ========================================================
+         * CUP PRICE
+         * ========================================================
+         */
+
+        let cupPrice:
+          string | null = null;
+
+        const cupSelectors =
+          [
+            'product-price-meta .cupPrice',
+            'product-price-meta [class*="cupPrice" i]',
+            '[class*="cup-price" i]',
+            '[class*="unit-price" i]',
+          ];
+
+        for (
+          const selector of
+            cupSelectors
+        ) {
+          const value =
+            getText(
+              selector
+            );
+
+          if (value) {
+            cupPrice =
+              value;
+
+            diagnostics.cupPriceSource =
+              `DOM:${selector}`;
+
+            break;
+          }
+        }
+
+        /*
+         * ========================================================
+         * AVAILABILITY
+         * ========================================================
+         */
+
+        let availability:
+          Availability =
+            'unknown';
+
+        const bodyText =
+          cleanText(
+            document.body
+              ?.innerText
+          ) || '';
+
+        /*
+         * Explicit OUT OF STOCK signals first.
+         */
+        if (
+          /\bout\s+of\s+stock\b/i.test(
+            bodyText
+          ) ||
+          /\bcurrently\s+unavailable\b/i.test(
+            bodyText
+          ) ||
+          /\btemporarily\s+unavailable\b/i.test(
+            bodyText
+          ) ||
+          /\bnot\s+available\b/i.test(
+            bodyText
+          )
+        ) {
+          availability =
+            'out_of_stock';
+
+          diagnostics.availabilitySource =
+            'TEXT:out-of-stock';
+        }
+
+        /*
+         * Add-to-trolley button.
+         */
+        if (
+          availability ===
+          'unknown'
+        ) {
+          const addButtons =
+            Array.from(
+              document.querySelectorAll(
+                [
+                  '[data-cy="addToTrolleyBtn"]',
+                  'button',
+                  'a',
+                ].join(', ')
+              )
+            );
+
+          const addButton =
+            addButtons.find(
+              (
+                element
+              ) => {
+                const text =
+                  cleanText(
+                    element.textContent
+                  ) || '';
+
+                return (
+                  /add\s+to\s+trolley/i.test(
+                    text
+                  ) ||
+                  /add\s+to\s+cart/i.test(
+                    text
+                  )
+                );
+              }
+            );
+
+          if (addButton) {
+            const disabled =
+              addButton.getAttribute(
+                'disabled'
+              );
+
+            const ariaDisabled =
+              addButton.getAttribute(
+                'aria-disabled'
+              );
+
+            if (
+              disabled !==
+                null ||
+              ariaDisabled ===
+                'true'
+            ) {
+              availability =
+                'out_of_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:add-to-trolley-disabled';
+            } else {
+              availability =
+                'in_stock';
+
+              diagnostics.availabilitySource =
+                'DOM:add-to-trolley';
+            }
+          }
+        }
+
+        /*
+         * Explicit "in stock" text.
+         */
+        if (
+          availability ===
+          'unknown'
+        ) {
+          if (
+            /\bin\s+stock\b/i.test(
+              bodyText
+            ) ||
+            /\bpick\s+up\s+today\b/i.test(
+              bodyText
+            ) ||
+            /\bavailable\s+for\s+pickup\b/i.test(
+              bodyText
+            )
+          ) {
+            availability =
+              'in_stock';
+
+            diagnostics.availabilitySource =
+              'TEXT:in-stock';
+          }
+        }
+
+        /*
+         * ========================================================
+         * CANONICAL URL
+         * ========================================================
+         */
+
+        const canonical =
+          getAttribute(
+            'link[rel="canonical"]',
+            'href'
+          );
+
+        const canonicalUrl =
+          canonical ||
+          window.location.href;
+
+        return {
+          name,
+          sku,
+          price,
+          originalPrice,
+          savings,
+          packageSize,
+          cupPrice,
+          availability,
+          canonicalUrl,
+          diagnostics,
+        };
+      }
+    );
+  }
+
+  /*
+   * ============================================================
+   * MAIN SCRAPER
+   * ============================================================
+   */
+
   async scrapeProduct(
     url: string
   ): Promise<WoolworthsScrapedProduct> {
-    let page: Page | null = null;
+    let page:
+      | Page
+      | null = null;
+
+    const startTime =
+      Date.now();
 
     try {
       await browserService.initialize();
 
-      page = await browserService.createPage('woolworths');
+      /*
+       * IMPORTANT:
+       *
+       * Use the persistent Woolworths context.
+       */
+      page =
+        await browserService.createPage(
+          'woolworths'
+        );
 
       logger.info(
-        `Scraping Woolworths product: ${url} using store ${this.storeName}`
+        `Scraping Woolworths product: ${url} ` +
+          `using ${this.storeName}`
       );
 
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: this.navigationTimeout,
-      });
-
-      await page.waitForTimeout(1000);
-
       /*
-       * ------------------------------------------------------------
-       * SELECT STORE (fast path if already configured)
-       * ------------------------------------------------------------
+       * ========================================================
+       * 1. NAVIGATE
+       * ========================================================
        */
 
-      const alreadyConfigured = await this.isStoreAlreadyConfigured(
-        page
-      );
-
-      if (alreadyConfigured) {
-        logger.info(
-          `Woolworths store ${this.storeName} already configured ` +
-            `for this session; skipping store selector UI`
-        );
-      } else {
-        await this.ensureStoreSelected(page);
-      }
-
-      try {
-        await page.waitForLoadState('networkidle', {
-          timeout: 3000,
-        });
-      } catch {
-        logger.debug(
-          `Woolworths networkidle timeout for ${url}; ` +
-            `continuing with rendered page`
-        );
-      }
-
-      await this.validateConfiguredStore(page);
-
-      /*
-       * ------------------------------------------------------------
-       * EXTRACT
-       * ------------------------------------------------------------
-       */
-
-      let product = await this.extractProduct(page);
-
-      /*
-       * SAFETY NET: if the fast path assumed the store was already
-       * configured but the banner doesn't actually confirm
-       * Birkenhead, fall back to the full explicit selection flow
-       * and re-extract.
-       */
-      if (alreadyConfigured) {
-        const banner = page
-          .locator(
-            'global-nav-how-where-when-bar .information-message'
-          )
-          .first();
-
-        const bannerText = await banner
-          .textContent({ timeout: 5000 })
-          .catch(() => null);
-
-        const cleanedBanner =
-          bannerText?.replace(/\s+/g, ' ').trim() || '';
-
-        const confirmed = new RegExp(
-          `${this.escapeRegExp(this.storeShortName())}\\s+store`,
-          'i'
-        ).test(cleanedBanner);
-
-        if (!confirmed) {
-          logger.warn(
-            `Woolworths fast-path assumption did not hold for ${url}; ` +
-              `falling back to explicit store selection`
-          );
-
-          await this.ensureStoreSelected(page);
-
-          await page.waitForTimeout(1000);
-
-          product = await this.extractProduct(page);
+      await page.goto(
+        url,
+        {
+          waitUntil:
+            'domcontentloaded',
+          timeout:
+            this.navigationTimeout,
         }
+      );
+
+      /*
+       * Don't wait for networkidle.
+       *
+       * Woolworths has ongoing requests and networkidle adds
+       * unnecessary latency / possible timeouts.
+       */
+
+      /*
+       * Give the product React components a short opportunity
+       * to render.
+       */
+      await page
+        .waitForTimeout(500);
+
+      /*
+       * ========================================================
+       * 2. STORE
+       * ========================================================
+       */
+
+      let storeConfigured =
+        await this.isStoreAlreadyConfigured(
+          page
+        );
+
+      if (
+        !storeConfigured
+      ) {
+        storeConfigured =
+          await this.ensureStoreSelected(
+            page
+          );
       }
 
+      /*
+       * ========================================================
+       * 3. WAIT FOR PRODUCT
+       * ========================================================
+       */
+
+      await page
+        .locator(
+          [
+            'h1.product-title',
+            'h1',
+            '[id^="product-"][id$="-top-price"]',
+          ].join(', ')
+        )
+        .first()
+        .waitFor({
+          state: 'visible',
+          timeout: 15000,
+        })
+        .catch(
+          () => {
+            logger.warn(
+              `Woolworths product elements were not detected ` +
+                `within the expected time for ${url}`
+            );
+          }
+        );
+
+      /*
+       * After store selection, Woolworths may update price /
+       * fulfilment asynchronously. Wait for the important product
+       * price element rather than networkidle.
+       */
+      await page
+        .locator(
+          '.presentPrice, [id$="-top-price"]'
+        )
+        .first()
+        .waitFor({
+          state: 'visible',
+          timeout: 10000,
+        })
+        .catch(
+          () => {
+            logger.debug(
+              `Woolworths price element not detected immediately`
+            );
+          }
+        );
+
+      /*
+       * ========================================================
+       * 4. EXTRACT
+       * ========================================================
+       */
+
+      let product =
+        await this.extractProduct(
+          page
+        );
+
+      /*
+       * ========================================================
+       * 5. SAFETY CHECK
+       * ========================================================
+       *
+       * If the persistent storage state said Birkenhead was
+       * configured but the banner disappeared / changed, try
+       * the explicit store flow once.
+       */
+
+      if (
+        !storeConfigured
+      ) {
+        logger.warn(
+          `Woolworths could not confirm ${this.storeName} ` +
+            `after store-selection flow`
+        );
+      }
+
+      const bannerConfirmed =
+        await this.waitForStoreBanner(
+          page,
+          3000
+        );
+
+      if (
+        !bannerConfirmed
+      ) {
+        logger.warn(
+          `Woolworths banner does not currently confirm ` +
+            `${this.storeName}`
+        );
+      }
+
+      /*
+       * If extraction failed badly, retry once after a short
+       * AJAX wait. This is much safer than blindly waiting
+       * networkidle.
+       */
+      if (
+        !product.name ||
+        product.price ===
+          null ||
+        product.sku ===
+          null
+      ) {
+        logger.debug(
+          `Woolworths product data incomplete; ` +
+            `waiting for AJAX update and retrying extraction`
+        );
+
+        await page
+          .waitForTimeout(1000);
+
+        product =
+          await this.extractProduct(
+            page
+          );
+      }
+
+      /*
+       * ========================================================
+       * 6. LOG
+       * ========================================================
+       */
+
+      const durationMs =
+        Date.now() -
+        startTime;
+
       logger.info(
-        `Woolworths extraction result for ${url}: ` +
+        `Woolworths extraction result: ` +
           `${JSON.stringify({
-            finalPageUrl: page.url(),
-            name: product.name,
-            sku: product.sku,
-            price: product.price,
-            originalPrice: product.originalPrice,
-            savings: product.savings,
-            availability: product.availability,
-            diagnostics: product.diagnostics,
+            finalPageUrl:
+              page.url(),
+            name:
+              product.name,
+            sku:
+              product.sku,
+            price:
+              product.price,
+            originalPrice:
+              product.originalPrice,
+            savings:
+              product.savings,
+            packageSize:
+              product.packageSize,
+            cupPrice:
+              product.cupPrice,
+            availability:
+              product.availability,
+            store:
+              this.storeName,
+            storeConfigured,
+            diagnostics:
+              product.diagnostics,
+            durationMs,
           })}`
       );
 
       /*
-       * ------------------------------------------------------------
-       * WARNINGS
-       * ------------------------------------------------------------
+       * ========================================================
+       * 7. WARNINGS
+       * ========================================================
        */
 
       if (!product.name) {
         logger.warn(
-          `Woolworths product name could not be extracted for ${url}`
+          `Woolworths product name could not be extracted: ${url}`
         );
       }
 
       if (!product.sku) {
         logger.warn(
-          `Woolworths SKU could not be extracted for ${url}`
+          `Woolworths SKU could not be extracted: ${url}`
         );
       }
 
-      if (product.price === null) {
+      if (
+        product.price ===
+        null
+      ) {
         logger.warn(
-          `Woolworths price could not be extracted for ${url}`
+          `Woolworths price could not be extracted: ${url}`
         );
       }
 
-      if (product.availability === 'unknown') {
+      if (
+        product.availability ===
+        'unknown'
+      ) {
         logger.warn(
-          `Woolworths availability could not be determined for ${url}`
+          `Woolworths availability could not be determined: ${url}`
         );
       }
 
       /*
-       * ------------------------------------------------------------
-       * RETURN
-       * ------------------------------------------------------------
+       * ========================================================
+       * 8. RETURN
+       * ========================================================
        */
 
       return {
-        site: 'woolworths',
-        url: product.canonicalUrl || page.url(),
-        name: product.name,
-        sku: product.sku,
-        price: product.price,
-        originalPrice: product.originalPrice,
-        savings: product.savings,
-        packageSize: product.packageSize,
-        cupPrice: product.cupPrice,
-        currency: 'NZD',
-        availability: product.availability,
-        store: this.storeName,
-        scrapedAt: new Date().toISOString(),
+        site:
+          'woolworths',
+
+        url:
+          product.canonicalUrl ||
+          page.url(),
+
+        name:
+          product.name,
+
+        sku:
+          product.sku,
+
+        price:
+          product.price,
+
+        originalPrice:
+          product.originalPrice,
+
+        savings:
+          product.savings,
+
+        packageSize:
+          product.packageSize,
+
+        cupPrice:
+          product.cupPrice,
+
+        currency:
+          'NZD',
+
+        availability:
+          product.availability,
+
+        store:
+          this.storeName,
+
+        scrapedAt:
+          new Date().toISOString(),
       };
     } catch (error) {
+      const durationMs =
+        Date.now() -
+        startTime;
+
       logger.error(
-        `Woolworths scraping failed for ${url}:`,
+        `Woolworths scraping failed after ${durationMs}ms for ${url}:`,
         error
       );
 
       throw error;
     } finally {
       if (page) {
-        await browserService.closePage(page);
+        await browserService.closePage(
+          page
+        );
       }
     }
   }
 }
 
-export const woolworthsAdapter = new WoolworthsAdapter();
+export const woolworthsAdapter =
+  new WoolworthsAdapter();
