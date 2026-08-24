@@ -30,6 +30,7 @@ const router = Router();
  *                   - repco
  *                   - chemistwarehouse 
  *                   - supercheapauto 
+ *                   - woolworths 
  *                 example: chemistwarehouse
  *               url:
  *                 type: string
