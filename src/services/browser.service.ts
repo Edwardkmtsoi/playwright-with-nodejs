@@ -27,7 +27,7 @@ export class BrowserService {
 
   /*
    * One BrowserContext per site (e.g. "supercheapauto",
-   * "chemistwarehouse", "paknsave"). Keeping sites in separate
+   * "chemistwarehouse", "woolworths"). Keeping sites in separate
    * contexts means each site's cookies/localStorage/store-selection
    * are fully isolated from one another - no risk of one site's
    * session state leaking into or clobbering another's.
@@ -80,6 +80,16 @@ export class BrowserService {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        /*
+         * Force HTTP/1.1 instead of HTTP/2. Woolworths' edge (and
+         * potentially others) was rejecting the HTTP/2 connection
+         * from headless Chromium through the proxy with
+         * net::ERR_HTTP2_PROTOCOL_ERROR. HTTP/1.1 is universally
+         * supported by every site we scrape, so this trades a
+         * theoretical (and here, non-existent) performance gain
+         * from HTTP/2 for reliability across all sites.
+         */
+        '--disable-http2',
       ],
     };
 
@@ -202,7 +212,7 @@ export class BrowserService {
   /**
    * Create a new page within the persistent context for the given
    * site. `site` should be a stable key per store, e.g.
-   * "supercheapauto", "chemistwarehouse", "paknsave". Defaults to
+   * "supercheapauto", "chemistwarehouse", "woolworths". Defaults to
    * "default" for backward compatibility if a caller doesn't pass
    * one, but adapters should always pass their own site key.
    */
