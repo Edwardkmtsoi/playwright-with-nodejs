@@ -22,6 +22,12 @@ const STORAGE_STATE_DIR =
   process.env.STORAGE_STATE_DIR ||
   path.join(process.cwd(), 'data', 'storage-state');
 
+interface ProxyConfig {
+  server: string;
+  username?: string;
+  password?: string;
+}
+
 export class BrowserService {
   private browser: Browser | null = null;
 
@@ -61,9 +67,26 @@ export class BrowserService {
   };
 
   /**
+   * Default proxy (used for every site's context unless that site
+   * has its own override - see getProxyConfigForSite()). Read once
+   * at launch time from PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD.
+   */
+  private defaultProxy: ProxyConfig | null = null;
+
+  /**
    * Launch the shared browser instance. Does NOT create any
    * per-site context - those are created lazily per site the first
    * time createPage(site) is called for that site.
+   *
+   * NOTE: the browser itself is launched WITHOUT a proxy baked in.
+   * Proxies are applied per-context instead (see
+   * getProxyConfigForSite() / getOrCreateContext()), because
+   * Playwright allows each newContext() call to specify its own
+   * proxy, overriding whatever (if anything) was set at launch.
+   * This lets different sites use different proxies - e.g.
+   * Woolworths on a dedicated mobile proxy, everything else on the
+   * shared residential/static one - without running multiple
+   * browser processes.
    */
   async initialize(): Promise<void> {
     if (this.browser) return;
@@ -74,6 +97,22 @@ export class BrowserService {
     const proxyUsername = process.env.PROXY_USERNAME;
     const proxyPassword = process.env.PROXY_PASSWORD;
 
+    if (proxyServer) {
+      this.defaultProxy = {
+        server: proxyServer,
+        ...(proxyUsername ? { username: proxyUsername } : {}),
+        ...(proxyPassword ? { password: proxyPassword } : {}),
+      };
+      logger.info(
+        `Default proxy configured: ${proxyServer} (applied per-context)`
+      );
+    } else {
+      logger.info(
+        'No default proxy configured - contexts without a ' +
+          'site-specific proxy will use a direct connection'
+      );
+    }
+
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless: env.PLAYWRIGHT_HEADLESS,
       args: [
@@ -81,43 +120,65 @@ export class BrowserService {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         /*
-         * Force HTTP/1.1 instead of HTTP/2. Woolworths' edge (and
-         * potentially others) was rejecting the HTTP/2 connection
-         * from headless Chromium through the proxy with
+         * Force HTTP/1.1 instead of HTTP/2. Some sites (Woolworths'
+         * edge, at least through certain proxies) reject the
+         * HTTP/2 connection from headless Chromium with
          * net::ERR_HTTP2_PROTOCOL_ERROR. HTTP/1.1 is universally
-         * supported by every site we scrape, so this trades a
-         * theoretical (and here, non-existent) performance gain
-         * from HTTP/2 for reliability across all sites.
+         * supported by every site we scrape.
          */
         '--disable-http2',
       ],
     };
-
-    // Configure proxy only when PROXY_SERVER is provided.
-    if (proxyServer) {
-      launchOptions.proxy = {
-        server: proxyServer,
-        ...(proxyUsername
-          ? {
-              username: proxyUsername,
-            }
-          : {}),
-        ...(proxyPassword
-          ? {
-              password: proxyPassword,
-            }
-          : {}),
-      };
-      logger.info(`Using configured proxy server: ${proxyServer}`);
-    } else {
-      logger.info('No proxy configured - using direct connection');
-    }
 
     this.browser = await chromium.launch(launchOptions);
 
     this.ensureStorageStateDirExists();
 
     logger.info('Playwright browser initialized');
+  }
+
+  /**
+   * Resolve which proxy a given site's context should use.
+   *
+   * Looks for site-specific env vars first, following the pattern:
+   *
+   *   PROXY_SERVER_<SITE>
+   *   PROXY_USERNAME_<SITE>
+   *   PROXY_PASSWORD_<SITE>
+   *
+   * e.g. for site="woolworths":
+   *
+   *   PROXY_SERVER_WOOLWORTHS
+   *   PROXY_USERNAME_WOOLWORTHS
+   *   PROXY_PASSWORD_WOOLWORTHS
+   *
+   * Falls back to the default proxy (PROXY_SERVER / etc.) if no
+   * site-specific override is set. Returns null if neither is
+   * configured (direct connection).
+   */
+  private getProxyConfigForSite(site: string): ProxyConfig | null {
+    const siteKey = site.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+
+    const siteServer = process.env[`PROXY_SERVER_${siteKey}`];
+
+    if (siteServer) {
+      const siteUsername =
+        process.env[`PROXY_USERNAME_${siteKey}`];
+      const sitePassword =
+        process.env[`PROXY_PASSWORD_${siteKey}`];
+
+      logger.info(
+        `Using site-specific proxy for site="${site}": ${siteServer}`
+      );
+
+      return {
+        server: siteServer,
+        ...(siteUsername ? { username: siteUsername } : {}),
+        ...(sitePassword ? { password: sitePassword } : {}),
+      };
+    }
+
+    return this.defaultProxy;
   }
 
   private ensureStorageStateDirExists(): void {
@@ -148,7 +209,7 @@ export class BrowserService {
   /**
    * Get the persistent context for a given site, creating it (and
    * restoring any previously-saved storage state) if it doesn't
-   * exist yet.
+   * exist yet. Applies that site's resolved proxy config, if any.
    */
   private async getOrCreateContext(
     site: string
@@ -179,11 +240,12 @@ export class BrowserService {
       const statePath = this.storageStatePath(site);
       const hasStoredState = fs.existsSync(statePath);
 
+      const proxy = this.getProxyConfigForSite(site);
+
       const context = await this.browser.newContext({
         ...this.contextOptions,
-        ...(hasStoredState
-          ? { storageState: statePath }
-          : {}),
+        ...(hasStoredState ? { storageState: statePath } : {}),
+        ...(proxy ? { proxy } : {}),
       });
 
       this.contexts.set(site, context);
@@ -194,7 +256,8 @@ export class BrowserService {
             hasStoredState
               ? ' (restored persisted storage state)'
               : ' (fresh, no prior storage state found)'
-          }`
+          }` +
+          `${proxy ? ` (proxy: ${proxy.server})` : ' (no proxy)'}`
       );
 
       return context;
