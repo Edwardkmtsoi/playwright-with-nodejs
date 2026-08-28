@@ -38,90 +38,92 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
   /**
    * Determine whether this adapter can handle the supplied URL.
    */
-  canHandle(url: string*: boolean {
+  canHandle(url: string): boolean {
     try {
-      const *arsedUrl = new URL(url);
-      con*t hostname = parsedUrl.hostname.to*owerCase();
+      const parsedUrl = new URL(url);
+      const hostname = parsedUrl.hostname.toLowerCase();
 
       return (
-      * hostname === 'hyperdrive.co.nz' |*
-        hostname.endsWith('.hyper*rive.co.nz')
+        hostname === 'hyperdrive.co.nz' ||
+        hostname.endsWith('.hyperdrive.co.nz')
       );
-    } catch *
+    } catch {
       return false;
     }
   }
 
-  ***
-   * Validate that the loaded p*ge appears to be a product page.
- * */
-  private async validateProduc*Page(
+  /**
+   * Validate that the loaded page appears to be a product page.
+   */
+  private async validateProductPage(
     page: Page,
-    expected*roductUrl: string
-  ): Promise<voi*> {
-    const currentUrl = page.ur*();
+    expectedProductUrl: string
+  ): Promise<void> {
+    const currentUrl = page.url();
 
-    const heading = await pag*
+    const heading = await page
       .locator('h1')
-      .first*)
+      .first()
       .textContent({
-        tim*out: 10000,
+        timeout: 10000,
       })
-      .catch(*) => null);
+      .catch(() => null);
 
-    const cleanedHead*ng =
-      heading
-        ?.repla*e(/\s+/g, ' ')
-        .trim() || *ull;
-
-    const productName = awai* page
+    const productName = await page
       .locator(
         [
           'h1 [itemprop="name"]',
           'h1[itemprop="name"]',
           '[itemprop="name"]',
-        ]*join(', ')
+        ].join(', ')
       )
       .first()
-*     .textContent({
-        timeou*: 5000,
+      .textContent({
+        timeout: 5000,
       })
-      .catch(() =* null);
+      .catch(() => null);
 
-    const priceElementCou*t = await page
+    const priceElementCount = await page
       .locator(
-   *    [
+        [
           '[itemprop="offers"] [itemprop="price"]',
           '[itemprop="price"]',
           '.tyrePrice .price',
           '.price-area .price',
         ].join(', ')
-*     )
+      )
       .count()
-      .catch*() => 0);
+      .catch(() => 0);
+
+    const cleanedHeading =
+      heading?.replace(/\s+/g, ' ').trim() || null;
+
+    const cleanedProductName =
+      productName?.replace(/\s+/g, ' ').trim() || null;
 
     if (
-      !cleaned*eading &&
-      !productName &&
-  *   priceElementCount === 0
-    ) {*      throw new Error(
-        `Hy*erdrive extraction aborted because*the loaded page ` +
-          `doe* not appear to be a product page. * +
-          `Current URL: ${curre*tUrl}; ` +
-          `expected URL* ${expectedProductUrl}`
+      !cleanedHeading &&
+      !cleanedProductName &&
+      priceElementCount === 0
+    ) {
+      throw new Error(
+        `Hyperdrive extraction aborted because the loaded page ` +
+          `does not appear to be a product page. ` +
+          `Current URL: ${currentUrl}; ` +
+          `expected URL: ${expectedProductUrl}`
       );
- *  }
+    }
   }
 
   /**
-   * Extract produc* details from the rendered Hyperdr*ve page.
+   * Extract product information from the rendered Hyperdrive page.
    */
-  private async ext*actProduct(
+  private async extractProduct(
     page: Page
-  ): Pr*mise<ExtractedProduct> {
-    retur* page.evaluate((): ExtractedProduc* => {
+  ): Promise<ExtractedProduct> {
+    return page.evaluate((): ExtractedProduct => {
       const cleanText = (
-  *     value: string | null | undefi*ed
+        value: string | null | undefined
       ): string | null => {
         if (!value) {
           return null;
@@ -147,23 +149,27 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           .replace(/,/g, '')
           .trim();
 
-        /*
-         * Matches:
-         *
-         * 29.99
-         * $29.99
-         * NZD 29.99
-         * NZ$29.99
-         */
-        const match = cleaned.match(
-          /(?:NZD|NZ\$|\$)?\s*(\d+(?:\.\d{1,2})?)/
+        const currencyMatch = cleaned.match(
+          /(?:NZD|NZ\$|\$)\s*(\d+(?:\.\d{1,2})?)/
         );
 
-        if (!match) {
+        if (currencyMatch) {
+          const parsed = Number(currencyMatch[1]);
+
+          return Number.isFinite(parsed)
+            ? parsed
+            : null;
+        }
+
+        const numericMatch = cleaned.match(
+          /^\s*(\d+(?:\.\d{1,2})?)\s*$/
+        );
+
+        if (!numericMatch) {
           return null;
         }
 
-        const parsed = Number(match[1]);
+        const parsed = Number(numericMatch[1]);
 
         return Number.isFinite(parsed)
           ? parsed
@@ -176,9 +182,7 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
         const element =
           document.querySelector(selector);
 
-        return cleanText(
-          element?.textContent
-        );
+        return cleanText(element?.textContent);
       };
 
       const getAttribute = (
@@ -224,11 +228,10 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
         selector: string | null;
       } => {
         for (const selector of selectors) {
-          const value =
-            getAttribute(
-              selector,
-              attribute
-            );
+          const value = getAttribute(
+            selector,
+            attribute
+          );
 
           if (value) {
             return {
@@ -257,15 +260,8 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
        * ============================================================
        * PRODUCT NAME
        * ============================================================
-       *
-       * Supplied Hyperdrive HTML:
-       *
-       * <h1 class="page-heading-underline list-heading">
-       *   <span itemprop="name">
-       *     Plasti-Dip Liquid Tape Spray 170G Black
-       *   </span>
-       * </h1>
        */
+
       let name: string | null = null;
 
       const nameResult = getFirstText([
@@ -284,38 +280,30 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           `DOM:${nameResult.selector}`;
       }
 
-      /*
-       * Schema markup fallback.
-       */
       if (!name) {
-        const schemaName =
-          getAttribute(
-            'meta[itemprop="name"]',
-            'content'
-          );
+        const metadataName = getAttribute(
+          'meta[itemprop="name"]',
+          'content'
+        );
 
-        if (schemaName) {
-          name = schemaName;
+        if (metadataName) {
+          name = metadataName;
           diagnostics.nameSource =
             'META:itemprop=name';
         }
       }
 
-      /*
-       * Document title fallback.
-       */
       if (!name) {
-        const title =
-          cleanText(document.title);
+        const title = cleanText(document.title);
 
         if (title) {
           name = title
             .replace(
-              /\s*[|–-]\s*Hyper\s*Drive.*$/i,
+              /\s*(?:\||-)\s*Hyper\s*Drive.*$/i,
               ''
             )
             .replace(
-              /\s*[|–-]\s*Hyperdrive.*$/i,
+              /\s*(?:\||-)\s*Hyperdrive.*$/i,
               ''
             )
             .trim();
@@ -329,19 +317,11 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
        * ============================================================
        * SKU
        * ============================================================
-       *
-       * Supplied Hyperdrive HTML:
-       *
-       * <small class="pull-right">
-       *   SKU #<span>1031-221-408569</span>
-       * </small>
        */
+
       let sku: string | null = null;
 
-      /*
-       * Prefer structured metadata if it exists.
-       */
-      const skuMetaResult =
+      const skuMetadataResult =
         getFirstAttribute(
           [
             'meta[itemprop="sku"]',
@@ -352,15 +332,12 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           'content'
         );
 
-      if (skuMetaResult.value) {
-        sku = skuMetaResult.value;
+      if (skuMetadataResult.value) {
+        sku = skuMetadataResult.value;
         diagnostics.skuSource =
-          `META:${skuMetaResult.selector}`;
+          `META:${skuMetadataResult.selector}`;
       }
 
-      /*
-       * Hyperdrive SKU element.
-       */
       if (!sku) {
         const skuContainers = Array.from(
           document.querySelectorAll(
@@ -375,8 +352,9 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
         );
 
         for (const container of skuContainers) {
-          const containerText =
-            cleanText(container.textContent);
+          const containerText = cleanText(
+            container.textContent
+          );
 
           if (
             !containerText ||
@@ -385,15 +363,10 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
             continue;
           }
 
-          /*
-           * First try the child span because the supplied HTML places
-           * the exact SKU inside it.
-           */
-          const spanValue =
-            cleanText(
-              container.querySelector('span')
-                ?.textContent
-            );
+          const spanValue = cleanText(
+            container.querySelector('span')
+              ?.textContent
+          );
 
           if (spanValue) {
             sku = spanValue;
@@ -402,18 +375,12 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
             break;
           }
 
-          /*
-           * Text fallback:
-           *
-           * SKU #1031-221-408569
-           */
-          const match =
-            containerText.match(
-              /\bSKU\s*#?\s*:?\s*([A-Z0-9._-]+)/i
-            );
+          const skuMatch = containerText.match(
+            /\bSKU\s*#?\s*:?\s*([A-Z0-9._-]+)/i
+          );
 
-          if (match) {
-            sku = match[1];
+          if (skuMatch) {
+            sku = skuMatch[1];
             diagnostics.skuSource =
               'TEXT:SKU';
             break;
@@ -425,18 +392,9 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
        * ============================================================
        * CURRENT PRICE
        * ============================================================
-       *
-       * Supplied Hyperdrive HTML:
-       *
-       * <span
-       *   itemprop="price"
-       *   content="29.99"
-       *   class="price"
-       * >
-       *   <span>$29.99</span>
-       * </span>
        */
-      let price: number | null =*null;
+
+      let price: number | null = null;
 
       const priceSelectors = [
         '[itemprop="offers"] [itemprop="price"]',
@@ -457,15 +415,12 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           continue;
         }
 
-        /*
-         * The content attribute is preferred because it contains the
-         * clean numeric value without currency symbols or formatting.
-         */
-        const candidate =
-          parsePrice(
-            element.getAttribute('content') ||
-              element.textContent
-          );
+        const content =
+          element.getAttribute('content');
+
+        const candidate = parsePrice(
+          content || element.textContent
+        );
 
         if (candidate !== null) {
           price = candidate;
@@ -477,19 +432,13 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
 
       /*
        * ============================================================
-       * ORIGINAL / USUAL PRICE
+       * ORIGINAL PRICE
        * ============================================================
-       *
-       * Hyperdrive may display the previous price inside:
-       *
-       * <div class="usuallyPrice">...</div>
-       *
-       * In the supplied example this element is empty, so the result
-       * will correctly remain null.
        */
-      let originalPrice: number * null = null;
 
-      const origina*PriceSelectors = [
+      let originalPrice: number | null = null;
+
+      const originalPriceSelectors = [
         '.usuallyPrice',
         '.usualPrice',
         '.wasPrice',
@@ -503,8 +452,7 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
       ];
 
       for (
-        const selector of
-        originalPriceSelectors
+        const selector of originalPriceSelectors
       ) {
         const element =
           document.querySelector(selector);
@@ -513,11 +461,12 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           continue;
         }
 
-        const candidate =
-          parsePrice(
-            element.getAttribute('content') ||
-              element.textContent
-          );
+        const content =
+          element.getAttribute('content');
+
+        const candidate = parsePrice(
+          content || element.textContent
+        );
 
         if (
           candidate !== null &&
@@ -533,15 +482,8 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
         }
       }
 
-      /*
-       * Text fallback for:
-       *
-       * Usually $49.99
-       * Was $49.99
-       * RRP $49.99
-       */
       if (originalPrice === null) {
-        const relevantPriceArea =
+        const priceAreaText =
           cleanText(
             document.querySelector(
               '.price-area'
@@ -549,15 +491,14 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           ) || '';
 
         const originalPriceMatch =
-          relevantPriceArea.match(
+          priceAreaText.match(
             /\b(?:Usually|Was|RRP)\s*:?\s*(?:NZD|NZ\$|\$)?\s*([\d,]+(?:\.\d{1,2})?)/i
           );
 
         if (originalPriceMatch) {
-          const candidate =
-            parsePrice(
-              originalPriceMatch[1]
-            );
+          const candidate = parsePrice(
+            originalPriceMatch[1]
+          );
 
           if (
             candidate !== null &&
@@ -577,21 +518,16 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
        * ============================================================
        * CURRENCY
        * ============================================================
-       *
-       * Supplied Hyperdrive HTML:
-       *
-       * <meta
-       *   itemprop="priceCurrency"
-       *   content="NZD"
-       * >
        */
-      let currency = '*ZD';
 
-      const currencyResult =*        getFirstAttribute(
+      let currency = 'NZD';
+
+      const currencyResult =
+        getFirstAttribute(
           [
             '[itemprop="offers"] [itemprop="priceCurrency"]',
             'meta[itemprop="priceCurrency"]',
-            '[itemprop="priceCurrency"]',
+            '[itemprop="priceCurrency"][content]',
           ],
           'content'
         );
@@ -611,97 +547,62 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
        * ============================================================
        * AVAILABILITY
        * ============================================================
-       *
-       * This is general Hyperdrive online/DC availability.
-       * There is no store or postcode selection.
-       *
-       * Supplied HTML:
-       *
-       * <meta
-       *   itemprop="availability"
-       *   content="https://schema.org/InStock"
-       * >
-       *
-       * and:
-       *
-       * <span class="in-stock stock-levels">
-       *   In stock at Distribution Centre
-       * </span>
        */
+
       let availability: Availability =
         'unknown';
 
-      /*
-       * Primary source: Schema.org metadata.
-       */
-      const availabilityMetaResu*t =
+      const availabilityMetadataResult =
         getFirstAttribute(
-   *      [
+          [
             '[itemprop="offers"] meta[itemprop="availability"]',
             'meta[itemprop="availability"]',
             '[itemprop="availability"][content]',
           ],
           'content'
-        *;
+        );
 
-      if (availabilityMetaResul*.value) {
-        const normalized*vailability =
-          availabili*yMetaResult.value
-            .toL*werCase()
+      if (availabilityMetadataResult.value) {
+        const normalized =
+          availabilityMetadataResult.value
+            .toLowerCase()
             .replace(/[_\s-]/g, '');
 
         if (
-        * normalizedAvailability.includes(
-*           'instock'
-          ) |*
-          normalizedAvailability.*ncludes(
-            'limitedavail*bility'
+          normalized.includes('instock') ||
+          normalized.includes(
+            'limitedavailability'
           ) ||
-          n*rmalizedAvailability.includes(
-   *        'onlineonly'
-          )
- *      ) {
-          availability =*'in_stock';
-          diagnostics.*vailabilitySource =
-            `M*TA:${availabilityMetaResult.select*r}`;
+          normalized.includes('onlineonly')
+        ) {
+          availability = 'in_stock';
+
+          diagnostics.availabilitySource =
+            `META:${availabilityMetadataResult.selector}`;
         } else if (
-         *normalizedAvailability.includes(
- *          'outofstock'
-          )*||
-          normalizedAvailabilit*.includes(
-            'soldout'
- *        ) ||
-          normalizedA*ailability.includes(
-            '*iscontinued'
-          )
-        )*{
-          availability = 'out_of*stock';
-          diagnostics.avai*abilitySource =
-            `META:${availabilityMetaResult.selector}`;
+          normalized.includes('outofstock') ||
+          normalized.includes('soldout') ||
+          normalized.includes('discontinued')
+        ) {
+          availability = 'out_of_stock';
+
+          diagnostics.availabilitySource =
+            `META:${availabilityMetadataResult.selector}`;
         } else if (
-          normalizedAvailability.includes(
-            'preorder'
-          ) ||
-          normalizedAvailability.includes(
-            'presale'
-          ) ||
-          normalizedAvailability.includes(
-            'backorder'
-          )
+          normalized.includes('preorder') ||
+          normalized.includes('presale') ||
+          normalized.includes('backorder')
         ) {
           availability =
             'check_availability';
 
           diagnostics.availabilitySource =
-            `META:${availabilityMetaResult.selector}`;
+            `META:${availabilityMetadataResult.selector}`;
         }
       }
 
-      /*
-       * Secondary source: Hyperdrive stock-status element.
-       */
-      if (availability === 'unkn*wn') {
-        const stockStatusRe*ult =
+      if (availability === 'unknown') {
+        const stockStatusResult =
           getFirstText([
             '.stock-status-area .in-stock',
             '.stock-status-area .out-of-stock',
@@ -715,11 +616,18 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           stockStatusResult.value || '';
 
         if (
-          /\bin\s+stock\b/i.test(stockStatus) ||
-          /\bavailable\b/i.test(stockStatus) ||
-          /\bships?\s+in\b/i.test(stockStatus)
+          /\bin\s+stock\b/i.test(
+            stockStatus
+          ) ||
+          /\bavailable\b/i.test(
+            stockStatus
+          ) ||
+          /\bships?\s+in\b/i.test(
+            stockStatus
+          )
         ) {
           availability = 'in_stock';
+
           diagnostics.availabilitySource =
             `DOM:${stockStatusResult.selector}`;
         } else if (
@@ -734,6 +642,7 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
           )
         ) {
           availability = 'out_of_stock';
+
           diagnostics.availabilitySource =
             `DOM:${stockStatusResult.selector}`;
         } else if (
@@ -758,27 +667,25 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
         }
       }
 
-      /*
-       * Tertiary fallback: Purchase button.
-       *
-       * Keep this confined to recognised purchase wording so that an
-       * unrelated button does not produce an in-stock result.
-       */
-      if (availability === 'unkn*wn') {
-        const purchaseEleme*t =
+      if (availability === 'unknown') {
+        const purchaseElement =
           Array.from(
-        *   document.querySelectorAll(
-    *         'button, a'
-            )*          ).find((element) => {
-  *         const text =
-            * cleanText(
-                elemen*.textContent
-              ) || ''*
+            document.querySelectorAll(
+              'button, a'
+            )
+          ).find((element) => {
+            const text =
+              cleanText(element.textContent) ||
+              '';
 
             return (
-           *  /\badd\s+to\s+cart\b/i.test(text* ||
-              /\bbuy\s+now\b/i*test(text) ||
-              /\badd\s+to\s+basket\b/i.test(text)
+              /\badd\s+to\s+cart\b/i.test(
+                text
+              ) ||
+              /\bbuy\s+now\b/i.test(text) ||
+              /\badd\s+to\s+basket\b/i.test(
+                text
+              )
             );
           });
 
@@ -793,6 +700,7 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
 
           if (!disabled) {
             availability = 'in_stock';
+
             diagnostics.availabilitySource =
               'FALLBACK:DOM:Purchase-button';
           }
@@ -801,3 +709,210 @@ export class HyperdriveAdapter implements ProductScraperAdapter {
 
       /*
        * ============================================================
+       * CANONICAL URL
+       * ============================================================
+       */
+
+      const canonicalUrl =
+        getAttribute(
+          'link[rel="canonical"]',
+          'href'
+        ) ||
+        window.location.href;
+
+      return {
+        name,
+        sku,
+        price,
+        originalPrice,
+        availability,
+        currency,
+        canonicalUrl,
+        diagnostics,
+      };
+    });
+  }
+
+  /**
+   * Main Hyperdrive scraping method.
+   */
+  async scrapeProduct(
+    url: string
+  ): Promise<HyperdriveScrapedProduct> {
+    let page: Page | null = null;
+
+    try {
+      await browserService.initialize();
+
+      page =
+        await browserService.createPage();
+
+      logger.info(
+        `Scraping Hyperdrive product: ${url}`
+      );
+
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.navigationTimeout,
+      });
+
+      const productPageUrl = page.url();
+
+      /*
+       * Allow initial client-side rendering to complete.
+       */
+      await page.waitForTimeout(800);
+
+      /*
+       * Wait for the product name or price element.
+       */
+      await page
+        .locator(
+          [
+            'h1 [itemprop="name"]',
+            'h1[itemprop="name"]',
+            '[itemprop="offers"] [itemprop="price"]',
+            '[itemprop="price"]',
+          ].join(', ')
+        )
+        .first()
+        .waitFor({
+          state: 'attached',
+          timeout: 15000,
+        })
+        .catch(() => {
+          logger.debug(
+            `Hyperdrive product markup wait timed out for ${url}; ` +
+              `continuing with the rendered page`
+          );
+        });
+
+      /*
+       * Network idle is optional because ecommerce websites can keep
+       * background connections open.
+       */
+      try {
+        await page.waitForLoadState(
+          'networkidle',
+          {
+            timeout: 2000,
+          }
+        );
+      } catch {
+        logger.debug(
+          `Hyperdrive networkidle timeout for ${url}; ` +
+            `continuing with the rendered page`
+        );
+      }
+
+      await this.validateProductPage(
+        page,
+        productPageUrl
+      );
+
+      const product =
+        await this.extractProduct(page);
+
+      logger.info(
+        `Hyperdrive extraction result for ${url}: ` +
+          `${JSON.stringify({
+            finalPageUrl: page.url(),
+            name: product.name,
+            sku: product.sku,
+            price: product.price,
+            originalPrice:
+              product.originalPrice,
+            currency: product.currency,
+            availability:
+              product.availability,
+            diagnostics:
+              product.diagnostics,
+          })}`
+      );
+
+      if (!product.name) {
+        logger.warn(
+          `Hyperdrive product name could not be extracted for ${url}`
+        );
+      }
+
+      if (!product.sku) {
+        logger.warn(
+          `Hyperdrive SKU could not be extracted for ${url}`
+        );
+      }
+
+      if (product.price === null) {
+        logger.warn(
+          `Hyperdrive price could not be extracted for ${url}`
+        );
+      }
+
+      if (
+        product.availability ===
+        'unknown'
+      ) {
+        logger.warn(
+          `Hyperdrive availability could not be determined ` +
+            `for SKU ${product.sku || 'unknown'} at ${url}`
+        );
+      }
+
+      /*
+       * Product name and current price are required for price
+       * monitoring.
+       */
+      if (!product.name) {
+        throw new Error(
+          `Hyperdrive product extraction failed because the ` +
+            `product name could not be determined for ${url}`
+        );
+      }
+
+      if (product.price === null) {
+        throw new Error(
+          `Hyperdrive product extraction failed because the ` +
+            `current price could not be determined for ${url}`
+        );
+      }
+
+      await this.validateProductPage(
+        page,
+        productPageUrl
+      );
+
+      return {
+        site: 'hyperdrive',
+        url:
+          product.canonicalUrl ||
+          page.url(),
+        name: product.name,
+        sku: product.sku,
+        price: product.price,
+        originalPrice:
+          product.originalPrice,
+        currency: product.currency,
+        availability:
+          product.availability,
+        scrapedAt:
+          new Date().toISOString(),
+      };
+    } catch (error) {
+      logger.error(
+        `Hyperdrive scraping failed for ${url}:`,
+        error
+      );
+
+      throw error;
+    } finally {
+      if (page) {
+        await browserService.closePage(
+          page
+        );
+      }
+    }
+  }
+}
+
+export const hyperdriveAdapter =
+  new HyperdriveAdapter();
