@@ -5,6 +5,7 @@ import { repcoAdapter } from './repco.adapter';
 import { chemistWarehouseAdapter } from './chemistwarehouse.adapter';
 import { supercheapAutoAdapter } from './supercheapauto.adapter';
 import { woolworthsAdapter } from './woolworthsAdapter';
+import { hyperdriveAdapter } from './hyperdrive.adapter';
 
 const siteAliases: Record<string, SupportedScrapeSite> = {
   repco: 'repco',
@@ -19,9 +20,12 @@ const siteAliases: Record<string, SupportedScrapeSite> = {
   supercheap: 'supercheapauto',
   sca: 'supercheapauto',
 
-   woolworths: 'woolworths',
+  woolworths: 'woolworths',
   woolworth: 'woolworths',
   countdown: 'woolworths',
+
+  hyperdrive: 'hyoerdrive',
+  hyperdrives: 'hyperdrive',
 };
 
 const adapters: Record<
@@ -32,6 +36,7 @@ const adapters: Record<
   chemistwarehouse: chemistWarehouseAdapter,
   supercheapauto: supercheapAutoAdapter,
   woolworths: woolworthsAdapter,
+  hyperdrive: hyperdriveAdapter,
 };
 
 function normalizeSite(site: string): SupportedScrapeSite | null {
