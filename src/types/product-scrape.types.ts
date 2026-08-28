@@ -3,6 +3,8 @@ export type SupportedScrapeSite =
   | 'chemistwarehouse'
   | 'supercheapauto'
   | 'woolworths';
+  | 'hyperdrive';
+
 
 export type ProductAvailability =
   | 'in_stock'
@@ -52,8 +54,14 @@ export interface WoolworthsScrapedProduct extends BaseScrapedProduct {
   store: string;
 }
 
+export interface HyperdriveScrapedProduct
+  extends BaseScrapedProduct {
+  site: 'hyperdrive';
+}
+
 export type ScrapedProduct =
   | RepcoScrapedProduct
   | ChemistWarehouseScrapedProduct
   | SupercheapAutoScrapedProduct
-  | WoolworthsScrapedProduct;
+  | WoolworthsScrapedProduct
+  | HyperdriveScrapedProduct;
