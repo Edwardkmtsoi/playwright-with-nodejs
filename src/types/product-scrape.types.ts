@@ -54,8 +54,7 @@ export interface WoolworthsScrapedProduct extends BaseScrapedProduct {
   store: string;
 }
 
-export interface HyperdriveScrapedProduct
-  extends BaseScrapedProduct {
+export interface HyperdriveScrapedProduct extends BaseScrapedProduct {
   site: 'hyperdrive';
 }
 
