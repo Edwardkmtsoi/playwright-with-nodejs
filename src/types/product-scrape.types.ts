@@ -2,7 +2,7 @@ export type SupportedScrapeSite =
   | 'repco'
   | 'chemistwarehouse'
   | 'supercheapauto'
-  | 'woolworths';
+  | 'woolworths'
   | 'hyperdrive';
 
 
