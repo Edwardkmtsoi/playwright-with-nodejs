@@ -24,7 +24,7 @@ const siteAliases: Record<string, SupportedScrapeSite> = {
   woolworth: 'woolworths',
   countdown: 'woolworths',
 
-  hyperdrive: 'hyoerdrive',
+  hyperdrive: 'hyperdrive',
   hyperdrives: 'hyperdrive',
 };
 
