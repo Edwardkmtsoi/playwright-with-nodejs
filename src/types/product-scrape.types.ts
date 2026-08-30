@@ -3,7 +3,9 @@ export type SupportedScrapeSite =
   | 'chemistwarehouse'
   | 'supercheapauto'
   | 'woolworths'
-  | 'hyperdrive';
+  | 'hyperdrive'
+  | 'newworld';
+
 
 
 export type ProductAvailability =
@@ -46,7 +48,8 @@ export interface SupercheapAutoScrapedProduct
   postalCode: string;
 }
 
-export interface WoolworthsScrapedProduct extends BaseScrapedProduct {
+export interface WoolworthsScrapedProduct 
+   extends BaseScrapedProduct {
   site: 'woolworths';
   savings: number | null;
   packageSize: string | null;
@@ -54,8 +57,21 @@ export interface WoolworthsScrapedProduct extends BaseScrapedProduct {
   store: string;
 }
 
-export interface HyperdriveScrapedProduct extends BaseScrapedProduct {
+export interface HyperdriveScrapedProduct 
+   extends BaseScrapedProduct {
   site: 'hyperdrive';
+}
+
+export interface NewWorldMultibuyOffer {
+  quantity: number;
+  price: number;
+}
+export interface NewWorldScrapedProduct extends BaseScrapedProduct {
+  site: 'newworld';
+  savings: number | null;
+  unitPrice: string | null;
+  multibuy: NewWorldMultibuyOffer | null;
+  store: string;
 }
 
 export type ScrapedProduct =
@@ -63,4 +79,5 @@ export type ScrapedProduct =
   | ChemistWarehouseScrapedProduct
   | SupercheapAutoScrapedProduct
   | WoolworthsScrapedProduct
-  | HyperdriveScrapedProduct;
+  | HyperdriveScrapedProduct
+  | NewWorldScrapedProduct;
