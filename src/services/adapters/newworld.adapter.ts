@@ -2,24 +2,17 @@ import { Page } from 'playwright';
 import logger from '../../config/logger';
 import { browserService } from '../browser.service';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
-import { NewWorldScrapedProduct } from '../../types/product-scrape.types';
-
-type Availability =
-  | 'in_stock'
-  | 'out_of_stock'
-  | 'check_availability'
-  | 'unknown';
-
-interface MultibuyOffer {
-  quantity: number;
-  price: number;
-}
+import {
+  NewWorldScrapedProduct,
+  NewWorldMultibuyOffer,
+  ProductAvailability,
+} from '../../types/product-scrape.types';
 
 interface ExtractionDiagnostics {
   nameSource: string | null;
+  skuSource: string | null;
   priceSource: string | null;
   originalPriceSource: string | null;
-  clubPlusPriceSource: string | null;
   unitPriceSource: string | null;
   multibuySource: string | null;
   availabilitySource: string | null;
@@ -28,12 +21,12 @@ interface ExtractionDiagnostics {
 
 interface ExtractedProduct {
   name: string | null;
+  sku: string | null;
   price: number | null;
   originalPrice: number | null;
-  clubPlusPrice: number | null;
   unitPrice: string | null;
-  multibuy: MultibuyOffer | null;
-  availability: Availability;
+  multibuy: NewWorldMultibuyOffer | null;
+  availability: ProductAvailability;
   currency: 'NZD';
   canonicalUrl: string;
   diagnostics: ExtractionDiagnostics;
@@ -264,7 +257,8 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         | 'in_stock'
         | 'out_of_stock'
         | 'check_availability'
-        | 'unknown';
+        | 'unknown'
+        | null;
 
       interface PageMultibuyOffer {
         quantity: number;
@@ -273,9 +267,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
       interface PageExtractionDiagnostics {
         nameSource: string | null;
+        skuSource: string | null;
         priceSource: string | null;
         originalPriceSource: string | null;
-        clubPlusPriceSource: string | null;
         unitPriceSource: string | null;
         multibuySource: string | null;
         availabilitySource: string | null;
@@ -284,9 +278,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
       interface PageExtractedProduct {
         name: string | null;
+        sku: string | null;
         price: number | null;
         originalPrice: number | null;
-        clubPlusPrice: number | null;
         unitPrice: string | null;
         multibuy: PageMultibuyOffer | null;
         availability: PageAvailability;
@@ -326,8 +320,8 @@ export class NewWorldAdapter implements ProductScraperAdapter {
       };
 
       const combineDollarsCents = (
-        dollarsEl: Element | null,
-        centsEl: Element | null
+        dollarsEl: Element | null | undefined,
+        centsEl: Element | null | undefined
       ): number | null => {
         const dollarsText = cleanText(dollarsEl?.textContent);
         const centsText = cleanText(centsEl?.textContent);
@@ -350,9 +344,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
       const diagnostics: PageExtractionDiagnostics = {
         nameSource: null,
+        skuSource: null,
         priceSource: null,
         originalPriceSource: null,
-        clubPlusPriceSource: null,
         unitPriceSource: null,
         multibuySource: null,
         availabilitySource: null,
@@ -391,44 +385,55 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
       /*
        * ============================================================
-       * REGULAR PRICE (schema.org offer, falls back to DOM digits)
+       * SKU
        * ============================================================
        */
 
-      let originalPrice: number | null = null;
+      let sku: string | null = null;
 
-      const priceMeta = document.querySelector(
-        '[itemprop="offers"] meta[itemprop="price"], meta[itemprop="price"]'
+      const skuMeta = getAttribute(
+        'meta[itemprop="sku"], meta[itemprop="productID"]',
+        'content'
       );
 
-      const priceMetaContent =
-        priceMeta?.getAttribute('content');
+      if (skuMeta) {
+        sku = skuMeta;
+        diagnostics.skuSource = 'META:itemprop=sku/productID';
+      }
+
+      /*
+       * ============================================================
+       * REGULAR PRICE (schema.org offer, falls back to DOM digits)
+       * This is New World's non-member "was" price when a Club+
+       * deal is active, or the selling price otherwise.
+       * ============================================================
+       */
+
+      let regularPrice: number | null = null;
+
+      const priceMetaContent = getAttribute(
+        '[itemprop="offers"] meta[itemprop="price"], meta[itemprop="price"]',
+        'content'
+      );
 
       if (priceMetaContent) {
         const parsed = Number(priceMetaContent);
 
         if (Number.isFinite(parsed)) {
-          originalPrice = parsed;
+          regularPrice = parsed;
           diagnostics.originalPriceSource =
             'META:itemprop=price';
         }
       }
 
-      if (originalPrice === null) {
-        const dollarsEl = document.querySelector(
-          '[data-testid="price-dollars"]'
-        );
-        const centsEl = document.querySelector(
-          '[data-testid="price-cents"]'
-        );
-
+      if (regularPrice === null) {
         const combined = combineDollarsCents(
-          dollarsEl,
-          centsEl
+          document.querySelector('[data-testid="price-dollars"]'),
+          document.querySelector('[data-testid="price-cents"]')
         );
 
         if (combined !== null) {
-          originalPrice = combined;
+          regularPrice = combined;
           diagnostics.originalPriceSource =
             'DOM:[data-testid="price-dollars/cents"]';
         }
@@ -440,57 +445,48 @@ export class NewWorldAdapter implements ProductScraperAdapter {
        * ============================================================
        */
 
-      let clubPlusPrice: number | null = null;
-
       const decal = document.querySelector(
         '[data-testid="decal-price"]'
       );
 
-      if (decal) {
-        const dollarsEl = decal.querySelector(
-          '[data-testid="price-dollars"]'
-        );
-        const centsEl = decal.querySelector(
-          '[data-testid="price-cents"]'
-        );
+      const clubPlusPrice = decal
+        ? combineDollarsCents(
+            decal.querySelector('[data-testid="price-dollars"]'),
+            decal.querySelector('[data-testid="price-cents"]')
+          )
+        : null;
 
-        const combined = combineDollarsCents(
-          dollarsEl,
-          centsEl
-        );
-
-        if (combined !== null) {
-          clubPlusPrice = combined;
-          diagnostics.clubPlusPriceSource =
-            'DOM:[data-testid="decal-price"]';
-        }
+      if (clubPlusPrice !== null) {
+        diagnostics.priceSource =
+          'DOM:[data-testid="decal-price"]';
       }
 
       /*
        * ============================================================
-       * CURRENT SELLING PRICE
-       * The Club+ deal price applies whenever it's present; otherwise
-       * fall back to the regular price. `originalPrice` is only kept
-       * as the "was" price when a discount is active.
+       * CURRENT SELLING PRICE vs ORIGINAL PRICE
+       * If a Club+ deal is active: price = deal price,
+       * originalPrice = regular price. Otherwise price = regular
+       * price and originalPrice is null (nothing to compare against).
        * ============================================================
        */
 
       let price: number | null = null;
+      let originalPrice: number | null = null;
 
       if (clubPlusPrice !== null) {
         price = clubPlusPrice;
+        originalPrice = regularPrice;
+      } else if (regularPrice !== null) {
+        price = regularPrice;
+
         diagnostics.priceSource =
-          'DERIVED:clubPlusPrice';
-      } else if (originalPrice !== null) {
-        price = originalPrice;
-        originalPrice = null;
-        diagnostics.priceSource =
-          'DERIVED:originalPrice (no active discount)';
+          diagnostics.priceSource ||
+          'DERIVED:regularPrice (no active discount)';
       }
 
       /*
        * ============================================================
-       * UNIT PRICE
+       * UNIT PRICE (e.g. "$0.89/100g")
        * ============================================================
        */
 
@@ -525,16 +521,13 @@ export class NewWorldAdapter implements ProductScraperAdapter {
           '[data-testid="multibuy-price"]'
         );
 
-        const dollarsEl = multibuyPriceEl?.querySelector(
-          '[data-testid="price-dollars"]'
-        );
-        const centsEl = multibuyPriceEl?.querySelector(
-          '[data-testid="price-cents"]'
-        );
-
         const combined = combineDollarsCents(
-          dollarsEl ?? null,
-          centsEl ?? null
+          multibuyPriceEl?.querySelector(
+            '[data-testid="price-dollars"]'
+          ),
+          multibuyPriceEl?.querySelector(
+            '[data-testid="price-cents"]'
+          )
         );
 
         if (quantityMatch && combined !== null) {
@@ -606,9 +599,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
       const result: PageExtractedProduct = {
         name,
+        sku,
         price,
         originalPrice,
-        clubPlusPrice,
         unitPrice,
         multibuy,
         availability,
@@ -702,15 +695,23 @@ export class NewWorldAdapter implements ProductScraperAdapter {
        */
       const product = await this.extractProduct(page);
 
+      const savings =
+        product.originalPrice !== null && product.price !== null
+          ? Math.round(
+              (product.originalPrice - product.price) * 100
+            ) / 100
+          : null;
+
       logger.info(
         `New World extraction result for ${url}: ` +
           `${JSON.stringify({
             finalPageUrl: page.url(),
             store: this.store.name,
             name: product.name,
+            sku: product.sku,
             price: product.price,
             originalPrice: product.originalPrice,
-            clubPlusPrice: product.clubPlusPrice,
+            savings,
             unitPrice: product.unitPrice,
             multibuy: product.multibuy,
             currency: product.currency,
@@ -725,6 +726,12 @@ export class NewWorldAdapter implements ProductScraperAdapter {
       if (!product.name) {
         logger.warn(
           `New World product name could not be extracted for ${url}`
+        );
+      }
+
+      if (!product.sku) {
+        logger.warn(
+          `New World SKU could not be extracted for ${url}`
         );
       }
 
@@ -765,9 +772,10 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         site: 'newworld',
         url: product.canonicalUrl || page.url(),
         name: product.name,
+        sku: product.sku,
         price: product.price,
         originalPrice: product.originalPrice,
-        clubPlusPrice: product.clubPlusPrice,
+        savings,
         unitPrice: product.unitPrice,
         multibuy: product.multibuy,
         currency: 'NZD',
