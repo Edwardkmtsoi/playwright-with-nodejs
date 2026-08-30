@@ -69,6 +69,38 @@ export class NewWorldAdapter implements ProductScraperAdapter {
   }
 
   /**
+   * Detect whether the current page is a Cloudflare (or similar)
+   * bot-challenge interstitial rather than real site content.
+   */
+  private async isBotChallenge(page: Page): Promise<boolean> {
+    const url = page.url();
+
+    if (/[?&]__cf_chl_rt_tk=/.test(url)) {
+      return true;
+    }
+
+    const title = await page.title().catch(() => '');
+
+    if (
+      /just a moment/i.test(title) ||
+      /attention required/i.test(title)
+    ) {
+      return true;
+    }
+
+    const hasChallengeMarkup = await page
+      .locator(
+        '#challenge-form, #cf-challenge-running, [id^="cf-chl"]'
+      )
+      .first()
+      .count()
+      .then((count) => count > 0)
+      .catch(() => false);
+
+    return hasChallengeMarkup;
+  }
+
+  /**
    * Validate that the loaded page appears to be a New World
    * product page.
    */
@@ -636,6 +668,41 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         waitUntil: 'domcontentloaded',
         timeout: this.navigationTimeout,
       });
+
+      /*
+       * Cloudflare (or similar) bot-management challenges can
+       * intercept the navigation before the real page loads.
+       * Give it a short window to auto-resolve, since real browsers
+       * typically clear it in a few seconds.
+       */
+      if (await this.isBotChallenge(page)) {
+        logger.warn(
+          `New World served a bot-management challenge for ${url}; ` +
+            `waiting to see if it clears`
+        );
+
+        try {
+          await page.waitForURL(
+            (candidateUrl) =>
+              !/[?&]__cf_chl_rt_tk=/.test(candidateUrl.toString()),
+            { timeout: 10000 }
+          );
+        } catch {
+          // Still on the challenge page — fall through to the check
+          // below, which will throw a clear, distinguishable error.
+        }
+
+        // Give any post-redirect content a moment to render.
+        await page.waitForTimeout(1000);
+      }
+
+      if (await this.isBotChallenge(page)) {
+        throw new Error(
+          `New World blocked this request with a bot-management ` +
+            `challenge for ${url}. This is not a selector/parsing ` +
+            `issue — the site did not serve product content.`
+        );
+      }
 
       const productPageUrl = page.url();
 
