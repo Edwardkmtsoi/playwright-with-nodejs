@@ -28,8 +28,8 @@ const siteAliases: Record<string, SupportedScrapeSite> = {
   hyperdrive: 'hyperdrive',
   hyperdrives: 'hyperdrive',
   
-  newworld: 'newwworld',
-  neworld: 'newwworld',
+  newworld: 'newworld',
+  neworld: 'newworld',
   
 };
 
