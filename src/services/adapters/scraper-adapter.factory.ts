@@ -6,7 +6,7 @@ import { chemistWarehouseAdapter } from './chemistwarehouse.adapter';
 import { supercheapAutoAdapter } from './supercheapauto.adapter';
 import { woolworthsAdapter } from './woolworthsAdapter';
 import { hyperdriveAdapter } from './hyperdrive.adapter';
-import { newWorldAdapter } from './new-world.adapter';
+import { newWorldAdapter } from './newworld.adapter';
 
 const siteAliases: Record<string, SupportedScrapeSite> = {
   repco: 'repco',
@@ -29,7 +29,7 @@ const siteAliases: Record<string, SupportedScrapeSite> = {
   hyperdrives: 'hyperdrive',
   
   newworld: 'newwworld',
-  newworld: 'newwworld',
+  neworld: 'newwworld',
   
 };
 
