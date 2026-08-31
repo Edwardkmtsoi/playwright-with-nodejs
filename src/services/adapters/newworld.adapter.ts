@@ -210,6 +210,89 @@ export class NewWorldAdapter implements ProductScraperAdapter {
   }
 
   /**
+   * Open the store-selection modal by clicking the "Collect from
+   * <store>" label on the product page, which reveals a store
+   * search input (aria-label="Choose a store",
+   * placeholder="Search by store name, city or town/suburb").
+   * Falls back to a couple of other common trigger patterns in
+   * case the label text or layout varies on some pages.
+   */
+  private async openStorePicker(page: Page): Promise<void> {
+    const storeSearchInput = page.getByPlaceholder(
+      'Search by store name, city or town/suburb'
+    );
+
+    const alreadyOpen = await storeSearchInput
+      .isVisible()
+      .catch(() => false);
+
+    if (alreadyOpen) {
+      logger.debug('New World store picker already open');
+      return;
+    }
+
+    const triggerCandidates: Array<{
+      description: string;
+      locator: () => ReturnType<Page['locator']>;
+    }> = [
+      {
+        description: '"Collect from <store>" label',
+        locator: () =>
+          page.locator('p:has-text("Collect from"):visible').first(),
+      },
+      {
+        description: '"Change store" link/button',
+        locator: () =>
+          page
+            .getByRole('button', { name: /change store/i })
+            .or(page.getByRole('link', { name: /change store/i }))
+            .first(),
+      },
+      {
+        description: '"Find a store" link/button',
+        locator: () =>
+          page
+            .getByRole('button', { name: /find a store/i })
+            .or(page.getByRole('link', { name: /find a store/i }))
+            .first(),
+      },
+    ];
+
+    for (const candidate of triggerCandidates) {
+      const element = candidate.locator();
+
+      const isVisible = await element.isVisible().catch(() => false);
+
+      if (!isVisible) {
+        continue;
+      }
+
+      logger.debug(
+        `Attempting to open New World store picker via: ${candidate.description}`
+      );
+
+      await element.click().catch(() => null);
+
+      const opened = await storeSearchInput
+        .isVisible({ timeout: 3000 })
+        .catch(() => false);
+
+      if (opened) {
+        logger.info(
+          `New World store picker opened via: ${candidate.description}`
+        );
+        return;
+      }
+    }
+
+    throw new Error(
+      'Could not open the New World store picker — none of the ' +
+        'known trigger patterns ("Collect from" label, Change ' +
+        'store, Find a store) revealed the store search input.'
+    );
+  }
+
+  /**
    * Ensure the configured store (New World Birkenhead) is selected
    * before scraping, since price and availability are store-specific.
    * No-ops if it's already set correctly.
@@ -230,32 +313,22 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         `switching to "${this.store.name}"`
     );
 
-    const collectTab = page
-      .locator('[data-testid="collect-tab-button"]:visible')
-      .first();
-
-    if (await collectTab.isVisible().catch(() => false)) {
-      const alreadySelected = await collectTab.getAttribute(
-        'aria-selected'
-      );
-
-      if (alreadySelected !== 'true') {
-        await collectTab.click();
-      }
-    }
+    await this.openStorePicker(page);
 
     /*
-     * IMPORTANT: the store-picker search input shares
-     * data-testid="search-bar-input" with New World's main
-     * site-wide search box in the top nav (placeholder
-     * "Search here..."). Targeting by data-testid alone matches
-     * both and either causes a strict-mode violation or, worse,
-     * silently fills the WRONG input. The store picker's input is
-     * uniquely identifiable by its placeholder text instead.
+     * The store search input's aria-label ("Choose a store") is a
+     * more precise handle than data-testid, since data-testid is
+     * shared with the site-wide search box. getByPlaceholder also
+     * works, kept here for redundancy in case the label ever changes.
      */
-    const searchInput = page.getByPlaceholder(
-      'Search by store name, city or town/suburb'
-    );
+    const searchInput = page
+      .getByLabel('Choose a store')
+      .or(
+        page.getByPlaceholder(
+          'Search by store name, city or town/suburb'
+        )
+      )
+      .first();
 
     await searchInput.waitFor({
       state: 'visible',
@@ -267,7 +340,7 @@ export class NewWorldAdapter implements ProductScraperAdapter {
     /*
      * The results dropdown closes on blur, so everything from here
      * needs to happen without an intervening action that could
-     * steal focus (no unrelated locator lookups in between).
+     * steal focus.
      */
     const resultAddress = page
       .locator(`text=${this.store.addressMatch}`)
