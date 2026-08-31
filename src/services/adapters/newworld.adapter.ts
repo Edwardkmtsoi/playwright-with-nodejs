@@ -179,13 +179,15 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
   /**
    * Read which fulfilment store is currently selected on the page,
-   * if any.
+   * if any. New World renders separate desktop/mobile instances of
+   * some elements with identical markup, so this is scoped to the
+   * first one Playwright considers visible.
    */
   private async getCurrentStore(
     page: Page
   ): Promise<string | null> {
     const collectLabel = page
-      .locator('p:has-text("Collect from")')
+      .locator('p:has-text("Collect from"):visible')
       .first();
 
     const isVisible = await collectLabel
@@ -228,9 +230,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         `switching to "${this.store.name}"`
     );
 
-    const collectTab = page.locator(
-      '[data-testid="collect-tab-button"]'
-    );
+    const collectTab = page
+      .locator('[data-testid="collect-tab-button"]:visible')
+      .first();
 
     if (await collectTab.isVisible().catch(() => false)) {
       const alreadySelected = await collectTab.getAttribute(
@@ -242,9 +244,16 @@ export class NewWorldAdapter implements ProductScraperAdapter {
       }
     }
 
-    const searchInput = page.locator(
-      '[data-testid="search-bar-input"]'
-    );
+    /*
+     * New World renders both a desktop (#search-bar-desktop) and a
+     * mobile (#search-bar-mobile) search input sharing the same
+     * data-testid, with only one actually visible depending on
+     * viewport. Scope to :visible so this doesn't hit a strict-mode
+     * violation, and keep .first() as a safety net.
+     */
+    const searchInput = page
+      .locator('[data-testid="search-bar-input"]:visible')
+      .first();
 
     await searchInput.waitFor({
       state: 'visible',
@@ -271,13 +280,23 @@ export class NewWorldAdapter implements ProductScraperAdapter {
     let selected = false;
 
     for (let i = 0; i < count; i++) {
-      const candidate = resultCandidates.nth(i).locator('../..');
-      const candidateText = await candidate
+      const candidate = resultCandidates.nth(i);
+
+      const isVisible = await candidate
+        .isVisible()
+        .catch(() => false);
+
+      if (!isVisible) {
+        continue;
+      }
+
+      const container = candidate.locator('../..');
+      const containerText = await container
         .textContent()
         .catch(() => null);
 
-      if (candidateText?.includes(this.store.addressMatch)) {
-        await candidate.click();
+      if (containerText?.includes(this.store.addressMatch)) {
+        await container.click();
         selected = true;
         break;
       }
@@ -691,6 +710,14 @@ export class NewWorldAdapter implements ProductScraperAdapter {
        * the proxy connection is shared.
        */
       const proxy = getBorrowedWoolworthsProxy();
+
+      logger.info(
+        `Resolved proxy for New World: ${
+          proxy
+            ? `server=${proxy.server}, hasUsername=${!!proxy.username}, hasPassword=${!!proxy.password}`
+            : 'none'
+        }`
+      );
 
       page = await browserService.createPage('newworld', proxy);
 
