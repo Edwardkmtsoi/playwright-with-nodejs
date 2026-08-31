@@ -28,15 +28,32 @@ interface ProxyConfig {
   password?: string;
 }
 
+/*
+ * Sites that need HTTP/2 disabled at the Chromium launch level.
+ * This is a launch-wide flag (Playwright can't toggle it per
+ * context), so rather than applying it globally - which forces
+ * every site onto HTTP/1.1, an unusual signal for a real browser -
+ * it's opt-in per site here. Add a site key to this set only if
+ * that specific site throws net::ERR_HTTP2_PROTOCOL_ERROR.
+ *
+ * NOTE: because this is launch-wide, if ANY site in this set is
+ * used, --disable-http2 applies to ALL contexts, including sites
+ * not in the set. Keep this set empty unless something genuinely
+ * needs it.
+ */
+const SITES_REQUIRING_HTTP1: Set<string> = new Set([
+  // 'woolworths', // re-add if Woolworths starts failing again
+]);
+
 export class BrowserService {
   private browser: Browser | null = null;
 
   /*
    * One BrowserContext per site (e.g. "supercheapauto",
-   * "chemistwarehouse", "woolworths"). Keeping sites in separate
-   * contexts means each site's cookies/localStorage/store-selection
-   * are fully isolated from one another - no risk of one site's
-   * session state leaking into or clobbering another's.
+   * "chemistwarehouse", "woolworths", "newworld"). Keeping sites in
+   * separate contexts means each site's cookies/localStorage/store-
+   * selection are fully isolated from one another - no risk of one
+   * site's session state leaking into or clobbering another's.
    */
   private contexts: Map<string, BrowserContext> = new Map();
 
@@ -113,24 +130,68 @@ export class BrowserService {
       );
     }
 
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      /*
+       * Reduces some (not all) automation tells. Real Chrome ships
+       * with this feature enabled; some bot-detection scripts check
+       * for its absence as a signal.
+       */
+      '--disable-blink-features=AutomationControlled',
+    ];
+
+    if (SITES_REQUIRING_HTTP1.size > 0) {
+      /*
+       * Force HTTP/1.1 instead of HTTP/2. This is launch-wide - see
+       * SITES_REQUIRING_HTTP1 above for why it's opt-in and the
+       * tradeoff of enabling it.
+       */
+      launchArgs.push('--disable-http2');
+      logger.info(
+        `HTTP/1.1 forced at launch because these sites require it: ` +
+          `${Array.from(SITES_REQUIRING_HTTP1).join(', ')}`
+      );
+    }
+
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless: env.PLAYWRIGHT_HEADLESS,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        /*
-         * Force HTTP/1.1 instead of HTTP/2. Some sites (Woolworths'
-         * edge, at least through certain proxies) reject the
-         * HTTP/2 connection from headless Chromium with
-         * net::ERR_HTTP2_PROTOCOL_ERROR. HTTP/1.1 is universally
-         * supported by every site we scrape.
-         */
-        '--disable-http2',
-      ],
+      args: launchArgs,
+      /*
+       * Use real installed Chrome instead of Playwright's bundled
+       * Chromium when available. Real Chrome's build matches what
+       * bot-detection services expect much more closely (bundled
+       * Chromium has subtle differences in version strings, some
+       * headless-specific behaviors, etc). Falls back to bundled
+       * Chromium automatically if the "chrome" channel isn't
+       * installed in this environment - set PLAYWRIGHT_CHANNEL=""
+       * to explicitly disable this and always use bundled Chromium.
+       */
+      ...(env.PLAYWRIGHT_CHANNEL
+        ? { channel: env.PLAYWRIGHT_CHANNEL }
+        : {}),
     };
 
-    this.browser = await chromium.launch(launchOptions);
+    try {
+      this.browser = await chromium.launch(launchOptions);
+    } catch (error) {
+      if (env.PLAYWRIGHT_CHANNEL) {
+        logger.warn(
+          `Failed to launch with channel="${env.PLAYWRIGHT_CHANNEL}" ` +
+            `(likely not installed in this environment); falling back ` +
+            `to bundled Chromium`,
+          error
+        );
+
+        this.browser = await chromium.launch({
+          ...launchOptions,
+          channel: undefined,
+        });
+      } else {
+        throw error;
+      }
+    }
 
     this.ensureStorageStateDirExists();
 
@@ -146,11 +207,11 @@ export class BrowserService {
    *   PROXY_USERNAME_<SITE>
    *   PROXY_PASSWORD_<SITE>
    *
-   * e.g. for site="woolworths":
+   * e.g. for site="newworld":
    *
-   *   PROXY_SERVER_WOOLWORTHS
-   *   PROXY_USERNAME_WOOLWORTHS
-   *   PROXY_PASSWORD_WOOLWORTHS
+   *   PROXY_SERVER_NEWWORLD
+   *   PROXY_USERNAME_NEWWORLD
+   *   PROXY_PASSWORD_NEWWORLD
    *
    * Falls back to the default proxy (PROXY_SERVER / etc.) if no
    * site-specific override is set. Returns null if neither is
@@ -207,9 +268,57 @@ export class BrowserService {
   }
 
   /**
+   * Applies stealth patches to a context to reduce common headless
+   * automation tells that bot-management services (e.g. Cloudflare)
+   * check for via JS. This is not a guarantee of evasion - just
+   * removes the most basic, well-known signals.
+   */
+  private async applyStealthPatches(
+    context: BrowserContext
+  ): Promise<void> {
+    await context.addInitScript(() => {
+      // Remove the automation flag real browsers never set.
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+
+      // Headless Chromium reports an empty plugins array; real
+      // Chrome always has a handful (PDF viewer, etc).
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+
+      // Real Chrome exposes navigator.languages as a populated array.
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-NZ', 'en'],
+      });
+
+      // window.chrome is absent in some headless configurations;
+      // real Chrome always defines it.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).chrome = { runtime: {} };
+
+      // Patch the permissions API - headless Chromium sometimes
+      // resolves navigator.permissions.query() differently than a
+      // real user profile would for notifications.
+      const originalQuery = window.navigator.permissions.query;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window.navigator.permissions.query as any) = (
+        parameters: PermissionDescriptor
+      ) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({
+              state: Notification.permission,
+            } as PermissionStatus)
+          : originalQuery(parameters);
+    });
+  }
+
+  /**
    * Get the persistent context for a given site, creating it (and
    * restoring any previously-saved storage state) if it doesn't
-   * exist yet. Applies that site's resolved proxy config, if any.
+   * exist yet. Applies that site's resolved proxy config, if any,
+   * plus stealth patches.
    */
   private async getOrCreateContext(
     site: string
@@ -248,6 +357,8 @@ export class BrowserService {
         ...(proxy ? { proxy } : {}),
       });
 
+      await this.applyStealthPatches(context);
+
       this.contexts.set(site, context);
 
       logger.info(
@@ -275,9 +386,10 @@ export class BrowserService {
   /**
    * Create a new page within the persistent context for the given
    * site. `site` should be a stable key per store, e.g.
-   * "supercheapauto", "chemistwarehouse", "woolworths". Defaults to
-   * "default" for backward compatibility if a caller doesn't pass
-   * one, but adapters should always pass their own site key.
+   * "supercheapauto", "chemistwarehouse", "woolworths", "newworld".
+   * Defaults to "default" for backward compatibility if a caller
+   * doesn't pass one, but adapters should always pass their own
+   * site key.
    */
   async createPage(site: string = 'default'): Promise<Page> {
     const context = await this.getOrCreateContext(site);
@@ -295,7 +407,11 @@ export class BrowserService {
    * to disk. Adapters should call this after a successful store
    * selection (or any other state worth keeping) so future scrapes
    * - including after a container restart, if STORAGE_STATE_DIR is
-   * on a persistent volume - can skip re-doing that work.
+   * on a persistent volume - can skip re-doing that work. For sites
+   * behind a JS bot-challenge (e.g. Cloudflare), this also captures
+   * the cf_clearance cookie once a challenge is passed, letting
+   * subsequent scrapes potentially skip the challenge entirely -
+   * as long as the same proxy/IP is used on the next request too.
    */
   async persistStorageState(site: string): Promise<void> {
     const context = this.contexts.get(site);
