@@ -32,18 +32,6 @@ interface ExtractedProduct {
   diagnostics: ExtractionDiagnostics;
 }
 
-interface StoreConfig {
-  name: string;
-  searchTerm: string;
-  addressMatch: string;
-}
-
-const TARGET_STORE: StoreConfig = {
-  name: 'New World Birkenhead',
-  searchTerm: 'Birkenhead',
-  addressMatch: '180 Mokoia Road, Chatswood, Auckland, 0626',
-};
-
 /**
  * New World currently borrows the Woolworths proxy credentials
  * rather than having its own PROXY_SERVER_NEWWORLD env vars. If a
@@ -75,7 +63,15 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
   private readonly navigationTimeout = 60000;
 
-  private readonly store: StoreConfig = TARGET_STORE;
+  /*
+   * NOTE: this adapter does NOT set a specific fulfilment store.
+   * New World shows whatever price applies to its default/no-store
+   * state (or a previously-set store carried over via persisted
+   * cookies, if any). If prices ever need to reflect a specific
+   * store precisely, store selection would need to be re-added -
+   * see project history for the store-picker flow that was
+   * removed here (it was unreliable to trigger consistently).
+   */
 
   /**
    * Determine whether this adapter supports the supplied URL.
@@ -175,237 +171,6 @@ export class NewWorldAdapter implements ProductScraperAdapter {
           `expected URL: ${expectedProductUrl}`
       );
     }
-  }
-
-  /**
-   * Read which fulfilment store is currently selected on the page,
-   * if any. New World renders separate desktop/mobile instances of
-   * some elements with identical markup, so this is scoped to the
-   * first one Playwright considers visible.
-   */
-  private async getCurrentStore(
-    page: Page
-  ): Promise<string | null> {
-    const collectLabel = page
-      .locator('p:has-text("Collect from"):visible')
-      .first();
-
-    const isVisible = await collectLabel
-      .isVisible()
-      .catch(() => false);
-
-    if (!isVisible) {
-      return null;
-    }
-
-    const text =
-      (await collectLabel.textContent().catch(() => null))?.trim() ||
-      '';
-
-    const currentStore = text
-      .replace(/^Collect\s*from\s*/i, '')
-      .trim();
-
-    return currentStore || null;
-  }
-
-  /**
-   * Open the store-selection modal by clicking the "Collect from
-   * <store>" label on the product page, which reveals a store
-   * search input (aria-label="Choose a store",
-   * placeholder="Search by store name, city or town/suburb").
-   * Falls back to a couple of other common trigger patterns in
-   * case the label text or layout varies on some pages.
-   */
-  private async openStorePicker(page: Page): Promise<void> {
-    const storeSearchInput = page.getByPlaceholder(
-      'Search by store name, city or town/suburb'
-    );
-
-    const alreadyOpen = await storeSearchInput
-      .isVisible()
-      .catch(() => false);
-
-    if (alreadyOpen) {
-      logger.debug('New World store picker already open');
-      return;
-    }
-
-    const triggerCandidates: Array<{
-      description: string;
-      locator: () => ReturnType<Page['locator']>;
-    }> = [
-      {
-        description: '"Collect from <store>" label',
-        locator: () =>
-          page.locator('p:has-text("Collect from"):visible').first(),
-      },
-      {
-        description: '"Change store" link/button',
-        locator: () =>
-          page
-            .getByRole('button', { name: /change store/i })
-            .or(page.getByRole('link', { name: /change store/i }))
-            .first(),
-      },
-      {
-        description: '"Find a store" link/button',
-        locator: () =>
-          page
-            .getByRole('button', { name: /find a store/i })
-            .or(page.getByRole('link', { name: /find a store/i }))
-            .first(),
-      },
-    ];
-
-    for (const candidate of triggerCandidates) {
-      const element = candidate.locator();
-
-      const isVisible = await element.isVisible().catch(() => false);
-
-      if (!isVisible) {
-        continue;
-      }
-
-      logger.debug(
-        `Attempting to open New World store picker via: ${candidate.description}`
-      );
-
-      await element.click().catch(() => null);
-
-      const opened = await storeSearchInput
-        .isVisible({ timeout: 3000 })
-        .catch(() => false);
-
-      if (opened) {
-        logger.info(
-          `New World store picker opened via: ${candidate.description}`
-        );
-        return;
-      }
-    }
-
-    throw new Error(
-      'Could not open the New World store picker — none of the ' +
-        'known trigger patterns ("Collect from" label, Change ' +
-        'store, Find a store) revealed the store search input.'
-    );
-  }
-
-  /**
-   * Ensure the configured store (New World Birkenhead) is selected
-   * before scraping, since price and availability are store-specific.
-   * No-ops if it's already set correctly.
-   */
-  private async ensureStoreSet(page: Page): Promise<void> {
-    const currentStore = await this.getCurrentStore(page);
-
-    if (currentStore === this.store.name) {
-      logger.debug(
-        `New World store already set to "${this.store.name}"`
-      );
-
-      return;
-    }
-
-    logger.info(
-      `New World store is "${currentStore || 'unset'}"; ` +
-        `switching to "${this.store.name}"`
-    );
-
-    await this.openStorePicker(page);
-
-    /*
-     * The store search input's aria-label ("Choose a store") is a
-     * more precise handle than data-testid, since data-testid is
-     * shared with the site-wide search box. getByPlaceholder also
-     * works, kept here for redundancy in case the label ever changes.
-     */
-    const searchInput = page
-      .getByLabel('Choose a store')
-      .or(
-        page.getByPlaceholder(
-          'Search by store name, city or town/suburb'
-        )
-      )
-      .first();
-
-    await searchInput.waitFor({
-      state: 'visible',
-      timeout: 10000,
-    });
-
-    await searchInput.fill(this.store.searchTerm);
-
-    /*
-     * The results dropdown closes on blur, so everything from here
-     * needs to happen without an intervening action that could
-     * steal focus.
-     */
-    const resultAddress = page
-      .locator(`text=${this.store.addressMatch}`)
-      .first();
-
-    await resultAddress
-      .waitFor({ state: 'visible', timeout: 10000 })
-      .catch(() => {
-        throw new Error(
-          `New World store search returned no results for ` +
-            `"${this.store.searchTerm}"`
-        );
-      });
-
-    /*
-     * Click "Select" on the matching result. Searching a specific
-     * suburb term like "Birkenhead" reliably returns a single
-     * store, so there should only be one "Select" button rendered
-     * in the dropdown at this point.
-     */
-    const selectButton = page
-      .getByRole('button', { name: 'Select', exact: false })
-      .first();
-
-    await selectButton.waitFor({
-      state: 'visible',
-      timeout: 10000,
-    });
-
-    await selectButton.click();
-
-    /*
-     * After selecting, New World shows a confirmation card plus a
-     * "Continue shopping" link to dismiss the picker and return to
-     * the underlying page.
-     */
-    const continueShopping = page
-      .getByRole('link', { name: 'Continue shopping' })
-      .first();
-
-    await continueShopping
-      .waitFor({ state: 'visible', timeout: 10000 })
-      .catch(() => {
-        logger.debug(
-          `"Continue shopping" link did not appear after selecting ` +
-            `"${this.store.name}"; the picker may have closed on its own`
-        );
-      });
-
-    if (await continueShopping.isVisible().catch(() => false)) {
-      await continueShopping.click();
-    }
-
-    await page.waitForTimeout(500);
-
-    const confirmedStore = await this.getCurrentStore(page);
-
-    if (confirmedStore !== this.store.name) {
-      throw new Error(
-        `Failed to set New World store to "${this.store.name}" — ` +
-          `current store: "${confirmedStore || 'unknown'}"`
-      );
-    }
-
-    logger.info(`New World store set to "${this.store.name}"`);
   }
 
   /**
@@ -905,14 +670,9 @@ export class NewWorldAdapter implements ProductScraperAdapter {
       await this.validateProductPage(page, productPageUrl);
 
       /*
-       * Ensure the target store (New World Birkenhead) is selected
-       * before reading price/availability, since both are
-       * store-specific on New World.
-       */
-      await this.ensureStoreSet(page);
-
-      /*
-       * Extract the product information.
+       * Extract the product information. No store selection is
+       * performed - prices reflect whatever default/current store
+       * context the site serves.
        */
       const product = await this.extractProduct(page);
 
@@ -927,7 +687,6 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         `New World extraction result for ${url}: ` +
           `${JSON.stringify({
             finalPageUrl: page.url(),
-            store: this.store.name,
             name: product.name,
             sku: product.sku,
             price: product.price,
@@ -1001,14 +760,14 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         multibuy: product.multibuy,
         currency: 'NZD',
         availability: product.availability,
-        store: this.store.name,
+        store: '',
         scrapedAt: new Date().toISOString(),
       };
 
       /*
-       * Persist cookies (including any cf_clearance token earned by
-       * passing a challenge) so the next scrape can reuse this
-       * session and potentially skip the challenge entirely.
+       * Persist cookies so any session state naturally accrued
+       * (not from active store selection) carries over to the
+       * next scrape.
        */
       await browserService.persistStorageState('newworld');
 
