@@ -22,7 +22,7 @@ const STORAGE_STATE_DIR =
   process.env.STORAGE_STATE_DIR ||
   path.join(process.cwd(), 'data', 'storage-state');
 
-interface ProxyConfig {
+export interface ProxyConfig {
   server: string;
   username?: string;
   password?: string;
@@ -207,11 +207,11 @@ export class BrowserService {
    *   PROXY_USERNAME_<SITE>
    *   PROXY_PASSWORD_<SITE>
    *
-   * e.g. for site="newworld":
+   * e.g. for site="woolworths":
    *
-   *   PROXY_SERVER_NEWWORLD
-   *   PROXY_USERNAME_NEWWORLD
-   *   PROXY_PASSWORD_NEWWORLD
+   *   PROXY_SERVER_WOOLWORTHS
+   *   PROXY_USERNAME_WOOLWORTHS
+   *   PROXY_PASSWORD_WOOLWORTHS
    *
    * Falls back to the default proxy (PROXY_SERVER / etc.) if no
    * site-specific override is set. Returns null if neither is
@@ -319,9 +319,15 @@ export class BrowserService {
    * restoring any previously-saved storage state) if it doesn't
    * exist yet. Applies that site's resolved proxy config, if any,
    * plus stealth patches.
+   *
+   * @param proxyOverride - if provided (including explicit `null`),
+   * takes precedence over the site's own env-var-resolved proxy.
+   * Useful when a site should borrow another site's proxy
+   * credentials instead of using its own PROXY_SERVER_<SITE> vars.
    */
   private async getOrCreateContext(
-    site: string
+    site: string,
+    proxyOverride?: ProxyConfig | null
   ): Promise<BrowserContext> {
     const existing = this.contexts.get(site);
 
@@ -349,7 +355,10 @@ export class BrowserService {
       const statePath = this.storageStatePath(site);
       const hasStoredState = fs.existsSync(statePath);
 
-      const proxy = this.getProxyConfigForSite(site);
+      const proxy =
+        proxyOverride !== undefined
+          ? proxyOverride
+          : this.getProxyConfigForSite(site);
 
       const context = await this.browser.newContext({
         ...this.contextOptions,
@@ -390,9 +399,15 @@ export class BrowserService {
    * Defaults to "default" for backward compatibility if a caller
    * doesn't pass one, but adapters should always pass their own
    * site key.
+   *
+   * @param proxyOverride - optional explicit proxy config, taking
+   * precedence over the site's own PROXY_SERVER_<SITE> env vars.
    */
-  async createPage(site: string = 'default'): Promise<Page> {
-    const context = await this.getOrCreateContext(site);
+  async createPage(
+    site: string = 'default',
+    proxyOverride?: ProxyConfig | null
+  ): Promise<Page> {
+    const context = await this.getOrCreateContext(site, proxyOverride);
 
     const page = await context.newPage();
 
