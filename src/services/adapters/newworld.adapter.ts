@@ -245,15 +245,17 @@ export class NewWorldAdapter implements ProductScraperAdapter {
     }
 
     /*
-     * New World renders both a desktop (#search-bar-desktop) and a
-     * mobile (#search-bar-mobile) search input sharing the same
-     * data-testid, with only one actually visible depending on
-     * viewport. Scope to :visible so this doesn't hit a strict-mode
-     * violation, and keep .first() as a safety net.
+     * IMPORTANT: the store-picker search input shares
+     * data-testid="search-bar-input" with New World's main
+     * site-wide search box in the top nav (placeholder
+     * "Search here..."). Targeting by data-testid alone matches
+     * both and either causes a strict-mode violation or, worse,
+     * silently fills the WRONG input. The store picker's input is
+     * uniquely identifiable by its placeholder text instead.
      */
-    const searchInput = page
-      .locator('[data-testid="search-bar-input"]:visible')
-      .first();
+    const searchInput = page.getByPlaceholder(
+      'Search by store name, city or town/suburb'
+    );
 
     await searchInput.waitFor({
       state: 'visible',
@@ -262,12 +264,16 @@ export class NewWorldAdapter implements ProductScraperAdapter {
 
     await searchInput.fill(this.store.searchTerm);
 
-    const resultCandidates = page.locator(
-      `text=${this.store.name}`
-    );
+    /*
+     * The results dropdown closes on blur, so everything from here
+     * needs to happen without an intervening action that could
+     * steal focus (no unrelated locator lookups in between).
+     */
+    const resultAddress = page
+      .locator(`text=${this.store.addressMatch}`)
+      .first();
 
-    await resultCandidates
-      .first()
+    await resultAddress
       .waitFor({ state: 'visible', timeout: 10000 })
       .catch(() => {
         throw new Error(
@@ -276,37 +282,43 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         );
       });
 
-    const count = await resultCandidates.count();
-    let selected = false;
+    /*
+     * Click "Select" on the matching result. Searching a specific
+     * suburb term like "Birkenhead" reliably returns a single
+     * store, so there should only be one "Select" button rendered
+     * in the dropdown at this point.
+     */
+    const selectButton = page
+      .getByRole('button', { name: 'Select', exact: false })
+      .first();
 
-    for (let i = 0; i < count; i++) {
-      const candidate = resultCandidates.nth(i);
+    await selectButton.waitFor({
+      state: 'visible',
+      timeout: 10000,
+    });
 
-      const isVisible = await candidate
-        .isVisible()
-        .catch(() => false);
+    await selectButton.click();
 
-      if (!isVisible) {
-        continue;
-      }
+    /*
+     * After selecting, New World shows a confirmation card plus a
+     * "Continue shopping" link to dismiss the picker and return to
+     * the underlying page.
+     */
+    const continueShopping = page
+      .getByRole('link', { name: 'Continue shopping' })
+      .first();
 
-      const container = candidate.locator('../..');
-      const containerText = await container
-        .textContent()
-        .catch(() => null);
+    await continueShopping
+      .waitFor({ state: 'visible', timeout: 10000 })
+      .catch(() => {
+        logger.debug(
+          `"Continue shopping" link did not appear after selecting ` +
+            `"${this.store.name}"; the picker may have closed on its own`
+        );
+      });
 
-      if (containerText?.includes(this.store.addressMatch)) {
-        await container.click();
-        selected = true;
-        break;
-      }
-    }
-
-    if (!selected) {
-      throw new Error(
-        `Could not find "${this.store.name}" at ` +
-          `"${this.store.addressMatch}" in store search results`
-      );
+    if (await continueShopping.isVisible().catch(() => false)) {
+      await continueShopping.click();
     }
 
     await page.waitForTimeout(500);
