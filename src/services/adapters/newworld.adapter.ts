@@ -1,6 +1,6 @@
 import { Page } from 'playwright';
 import logger from '../../config/logger';
-import { browserService } from '../browser.service';
+import { browserService, ProxyConfig } from '../browser.service';
 import { ProductScraperAdapter } from './scraper-adapter.interface';
 import {
   NewWorldScrapedProduct,
@@ -43,6 +43,32 @@ const TARGET_STORE: StoreConfig = {
   searchTerm: 'Birkenhead',
   addressMatch: '180 Mokoia Road, Chatswood, Auckland, 0626',
 };
+
+/**
+ * New World currently borrows the Woolworths proxy credentials
+ * rather than having its own PROXY_SERVER_NEWWORLD env vars. If a
+ * dedicated New World proxy is provisioned later, delete this
+ * function and pass `undefined` to createPage() instead — that
+ * restores the default behavior of resolving PROXY_SERVER_NEWWORLD
+ * (falling back to the global PROXY_SERVER) via
+ * browserService's own site-based resolution.
+ */
+function getBorrowedWoolworthsProxy(): ProxyConfig | null {
+  const server = process.env.PROXY_SERVER_WOOLWORTHS;
+
+  if (!server) {
+    return null;
+  }
+
+  const username = process.env.PROXY_USERNAME_WOOLWORTHS;
+  const password = process.env.PROXY_PASSWORD_WOOLWORTHS;
+
+  return {
+    server,
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+  };
+}
 
 export class NewWorldAdapter implements ProductScraperAdapter {
   readonly site = 'newworld' as const;
@@ -657,9 +683,25 @@ export class NewWorldAdapter implements ProductScraperAdapter {
     try {
       await browserService.initialize();
 
-      page = await browserService.createPage();
+      /*
+       * New World currently borrows Woolworths' proxy credentials
+       * (see getBorrowedWoolworthsProxy above). The context itself
+       * stays keyed to "newworld", so cookies/storage state remain
+       * fully isolated from the actual Woolworths adapter — only
+       * the proxy connection is shared.
+       */
+      const proxy = getBorrowedWoolworthsProxy();
 
-      logger.info(`Scraping New World product: ${url}`);
+      page = await browserService.createPage('newworld', proxy);
+
+      logger.info(
+        `Scraping New World product: ${url}` +
+          `${
+            proxy
+              ? ` (using borrowed Woolworths proxy: ${proxy.server})`
+              : ' (no proxy configured)'
+          }`
+      );
 
       /*
        * Navigate to the product page.
@@ -850,6 +892,13 @@ export class NewWorldAdapter implements ProductScraperAdapter {
         store: this.store.name,
         scrapedAt: new Date().toISOString(),
       };
+
+      /*
+       * Persist cookies (including any cf_clearance token earned by
+       * passing a challenge) so the next scrape can reuse this
+       * session and potentially skip the challenge entirely.
+       */
+      await browserService.persistStorageState('newworld');
 
       return result;
     } catch (error) {
